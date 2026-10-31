@@ -615,6 +615,182 @@ index 00000000..50b356dd
 +chat_wallpaper_gradient_to=-16244678
 +chat_wallpaper_gradient_rotation=45
 +chat_outBubbleGradientAnimated=0
+diff --git a/TMessagesProj/src/main/java/org/telegram/messenger/AndroidUtilities.java b/TMessagesProj/src/main/java/org/telegram/messenger/AndroidUtilities.java
+index a5e9eb71..d7f3af40 100644
+--- a/TMessagesProj/src/main/java/org/telegram/messenger/AndroidUtilities.java
++++ b/TMessagesProj/src/main/java/org/telegram/messenger/AndroidUtilities.java
+@@ -3721,7 +3721,7 @@ public class AndroidUtilities {
+         }
+         File storageDir = null;
+         if (Environment.MEDIA_MOUNTED.equals(Environment.getExternalStorageState())) {
+-            storageDir = new File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_PICTURES), "Niagram");
++            storageDir = new File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_PICTURES), "ni12gram");
+             if (!storageDir.mkdirs()) {
+                 if (!storageDir.exists()) {
+                     if (BuildVars.LOGS_ENABLED) {
+diff --git a/TMessagesProj/src/main/java/org/telegram/messenger/MediaController.java b/TMessagesProj/src/main/java/org/telegram/messenger/MediaController.java
+index 537a5c98..cc13a337 100644
+--- a/TMessagesProj/src/main/java/org/telegram/messenger/MediaController.java
++++ b/TMessagesProj/src/main/java/org/telegram/messenger/MediaController.java
+@@ -1142,6 +1142,7 @@ public class MediaController implements AudioManager.OnAudioFocusChangeListener,
+     private final Object sync = new Object();
+ 
+     private ArrayList<ByteBuffer> recordBuffers = new ArrayList<>();
++    private Ni12VoiceEffect ni12Voice;
+     private ByteBuffer fileBuffer;
+     public int recordBufferSize = 1280;
+     public int sampleRate = 48000;
+@@ -1176,6 +1177,10 @@ public class MediaController implements AudioManager.OnAudioFocusChangeListener,
+                 int len = audioRecorder.read(buffer, buffer.capacity());
+                 if (len > 0) {
+                     buffer.limit(len);
++                    if (ni12Voice == null) ni12Voice = new Ni12VoiceEffect(sampleRate);
++                    buffer.position(0);
++                    ni12Voice.process(buffer, len);
++                    buffer.position(0);
+                     double sum = 0;
+                     try {
+                         long newSamplesCount = samplesCount + len / 2;
+diff --git a/TMessagesProj/src/main/java/org/telegram/messenger/Ni12VoiceEffect.java b/TMessagesProj/src/main/java/org/telegram/messenger/Ni12VoiceEffect.java
+new file mode 100644
+index 00000000..c38ed31e
+--- /dev/null
++++ b/TMessagesProj/src/main/java/org/telegram/messenger/Ni12VoiceEffect.java
+@@ -0,0 +1,134 @@
++package org.telegram.messenger;
++
++import android.content.Context;
++import android.content.SharedPreferences;
++
++import java.nio.ByteBuffer;
++import java.nio.ByteOrder;
++
++/**
++ * ni12gram voice changer. Works on 16-bit mono PCM. Pure Java, no Android deps in the DSP part.
++ * Modes: 0 = off, 1 = robot (metallic), 2 = anonymous (deep, masked).
++ */
++public final class Ni12VoiceEffect {
++
++    public static final int OFF = 0, ROBOT = 1, ANONYMOUS = 2;
++    private static volatile int mode = -1;
++
++    // ---- settings ----
++    public static int getMode() {
++        if (mode < 0) {
++            try {
++                SharedPreferences p = ApplicationLoader.applicationContext.getSharedPreferences("ni12voice", Context.MODE_PRIVATE);
++                mode = p.getInt("mode", OFF);
++            } catch (Throwable t) {
++                mode = OFF;
++            }
++        }
++        return mode;
++    }
++
++    public static void setMode(int m) {
++        mode = m;
++        try {
++            ApplicationLoader.applicationContext.getSharedPreferences("ni12voice", Context.MODE_PRIVATE).edit().putInt("mode", m).apply();
++        } catch (Throwable ignore) {
++        }
++    }
++
++    // ---- DSP state (one instance per audio path) ----
++    private final int rate;
++    private int curMode = OFF;
++    private double phase;
++    // robot comb
++    private final float[] comb;
++    private int combPos;
++    // anonymous pitch shifter (two crossfaded read taps over a delay line)
++    private final float[] dl;
++    private int dlW;
++    private double tapPos;
++    private float lp;
++
++    public Ni12VoiceEffect(int sampleRate) {
++        rate = sampleRate;
++        comb = new float[Math.max(2, sampleRate * 4 / 1000)];
++        dl = new float[Math.max(64, sampleRate * 60 / 1000)];
++    }
++
++    /** Process interleaved-less mono 16-bit little-endian samples in place. */
++    public void process(ByteBuffer buf, int bytes) {
++        int m = getMode();
++        if (m != curMode) {
++            curMode = m;
++            java.util.Arrays.fill(comb, 0);
++            java.util.Arrays.fill(dl, 0);
++            tapPos = 0;
++            lp = 0;
++        }
++        if (m == OFF) return;
++        ByteOrder old = buf.order();
++        buf.order(ByteOrder.LITTLE_ENDIAN);
++        int start = buf.position();
++        int n = bytes / 2;
++        for (int i = 0; i < n; i++) {
++            int idx = start + i * 2;
++            if (idx + 1 >= buf.limit()) break;
++            float x = buf.getShort(idx) / 32768f;
++            float y = m == ROBOT ? robot(x) : anonymous(x);
++            if (y > 1f) y = 1f; else if (y < -1f) y = -1f;
++            buf.putShort(idx, (short) (y * 32767f));
++        }
++        buf.order(old);
++    }
++
++    private float robot(float x) {
++        // ring modulation gives the "metal" tone
++        double w = 2 * Math.PI * 70.0 / rate;
++        phase += w;
++        if (phase > 2 * Math.PI) phase -= 2 * Math.PI;
++        float rm = (float) (x * Math.sin(phase));
++        // short comb filter adds the hollow resonance
++        float c = comb[combPos];
++        float y = 0.55f * x + 0.9f * rm + 0.45f * c;
++        comb[combPos] = clampf(y * 0.6f);
++        if (++combPos >= comb.length) combPos = 0;
++        return y * 0.85f;
++    }
++
++    private float anonymous(float x) {
++        // pitch down by ratio r (~ -6 semitones)
++        final float r = 0.707f;
++        final int len = dl.length;
++        final int win = len - 2;
++        dl[dlW] = x;
++        // tap delay sweeps 0..win; at ratio<1 delay grows by (1-r) per sample
++        tapPos += (1.0 - r);
++        if (tapPos >= win) tapPos -= win;
++        double d1 = tapPos;
++        double d2 = tapPos + win / 2.0;
++        if (d2 >= win) d2 -= win;
++        float s1 = read(d1), s2 = read(d2);
++        float g1 = (float) Math.sin(Math.PI * d1 / win);
++        float g2 = (float) Math.sin(Math.PI * d2 / win);
++        g1 *= g1; g2 *= g2; // equal-power-ish sum of squares of sin = 1
++        float y = s1 * g1 + s2 * g2;
++        if (++dlW >= len) dlW = 0;
++        // darken slightly + mild drive for a masked tone
++        lp += 0.35f * (y - lp);
++        float o = (float) Math.tanh(lp * 1.6f) * 0.9f;
++        return o;
++    }
++
++    private float read(double delay) {
++        double pos = dlW - delay;
++        while (pos < 0) pos += dl.length;
++        int i0 = (int) pos;
++        float f = (float) (pos - i0);
++        int i1 = i0 + 1 >= dl.length ? 0 : i0 + 1;
++        return dl[i0] * (1 - f) + dl[i1] * f;
++    }
++
++    private static float clampf(float v) {
++        return v > 1f ? 1f : (v < -1f ? -1f : v);
++    }
++}
 diff --git a/TMessagesProj/src/main/java/org/telegram/ui/ActionBar/Theme.java b/TMessagesProj/src/main/java/org/telegram/ui/ActionBar/Theme.java
 index 037673c6..47f776cd 100644
 --- a/TMessagesProj/src/main/java/org/telegram/ui/ActionBar/Theme.java
@@ -666,6 +842,58 @@ index 037673c6..47f776cd 100644
              if ("Default".equals(theme)) {
                  applyingTheme = themesDict.get("Blue");
                  applyingTheme.currentAccentId = DEFALT_THEME_ACCENT_ID;
+diff --git a/TMessagesProj/src/main/java/org/telegram/ui/ChatActivity.java b/TMessagesProj/src/main/java/org/telegram/ui/ChatActivity.java
+index 7bb617df..58f58ee0 100644
+--- a/TMessagesProj/src/main/java/org/telegram/ui/ChatActivity.java
++++ b/TMessagesProj/src/main/java/org/telegram/ui/ChatActivity.java
+@@ -477,6 +477,7 @@ public class ChatActivity extends BaseFragment implements
+     private final static int nkbtn_stickerdl = 2016;
+     private final static int nkbtn_unpin = 2017;
+     private final static int nkbtn_view_in_chat = 2018;
++    private final static int ni12_voice = 2950;
+     private final static int nkbtn_editAdmin = 2019;
+     private final static int nkbtn_editPermission = 2020;
+     private final static int nkbtn_copy_link_in_pm = 2025;
+@@ -4364,6 +4365,8 @@ public class ChatActivity extends BaseFragment implements
+                         args.putBoolean("addContact", true);
+                         presentFragment(new ContactAddActivity(args));
+                     }
++                } else if (id == ni12_voice) {
++                    showNi12VoiceDialog();
+                 } else if (id == mute) {
+                     toggleMute(false);
+                 } else if (id == add_shortcut) {
+@@ -4841,6 +4844,7 @@ public class ChatActivity extends BaseFragment implements
+                 avatarContainer.setAvatarOptionsMenuItem(headerItem);
+             }
+             headerItem.setForceHidden(isTitleCentered());
++            headerItem.lazilyAddSubItem(ni12_voice, R.drawable.msg_voicechat2_solar, LocaleController.getString(R.string.Ni12VoiceChanger));
+ 
+             if (currentUser != null && currentUser.self && chatMode != MODE_SAVED) {
+                 savedChatsItem = headerItem.lazilyAddSubItem(view_as_topics, R.drawable.msg_topics, LocaleController.getString(R.string.SavedViewAsChats));
+@@ -17791,6 +17795,22 @@ public class ChatActivity extends BaseFragment implements
+         }
+     }
+ 
++    private void showNi12VoiceDialog() {
++        if (getParentActivity() == null) return;
++        final String[] names = new String[]{
++                LocaleController.getString(R.string.Ni12VoiceOff),
++                LocaleController.getString(R.string.Ni12VoiceRobot),
++                LocaleController.getString(R.string.Ni12VoiceAnon)
++        };
++        AlertDialog.Builder builder = new AlertDialog.Builder(getParentActivity(), themeDelegate);
++        builder.setTitle(LocaleController.getString(R.string.Ni12VoiceChanger));
++        int cur = org.telegram.messenger.Ni12VoiceEffect.getMode();
++        names[cur] = "\u2713 " + names[cur];
++        builder.setItems(names, (d, which) -> org.telegram.messenger.Ni12VoiceEffect.setMode(which));
++        builder.setNegativeButton(LocaleController.getString(R.string.Close), null);
++        showDialog(builder.create());
++    }
++
+     private void toggleMute(boolean instant) {
+         boolean muted = getMessagesController().isDialogMuted(dialog_id, getTopicId());
+         if (!muted) {
 diff --git a/TMessagesProj/src/main/java/org/telegram/ui/IntroActivity.java b/TMessagesProj/src/main/java/org/telegram/ui/IntroActivity.java
 index b8babfe0..10ad04db 100644
 --- a/TMessagesProj/src/main/java/org/telegram/ui/IntroActivity.java
@@ -816,6 +1044,52 @@ index 2a53d668..ef5de012 100644
      private boolean pendingSwitchingAccount;
  
      private void onAuthSuccess(TLRPC.TL_auth_authorization res, boolean afterSignup) {
+diff --git a/TMessagesProj/src/main/java/org/webrtc/voiceengine/WebRtcAudioRecord.java b/TMessagesProj/src/main/java/org/webrtc/voiceengine/WebRtcAudioRecord.java
+index 5ea67a8d..2a51942a 100644
+--- a/TMessagesProj/src/main/java/org/webrtc/voiceengine/WebRtcAudioRecord.java
++++ b/TMessagesProj/src/main/java/org/webrtc/voiceengine/WebRtcAudioRecord.java
+@@ -154,6 +154,8 @@ public class WebRtcAudioRecord {
+   private class AudioRecordThread extends Thread {
+     private volatile boolean keepAlive = true;
+ 
++    private org.telegram.messenger.Ni12VoiceEffect ni12Voice;
++
+     public AudioRecordThread(String name) {
+       super(name);
+     }
+@@ -193,6 +195,10 @@ public class WebRtcAudioRecord {
+               byteBuffer.putShort(a * 2, (short) mixed);
+             }
+           }
++          if (ni12Voice == null) ni12Voice = new org.telegram.messenger.Ni12VoiceEffect(audioRecord.getSampleRate());
++          byteBuffer.position(0);
++          ni12Voice.process(byteBuffer, bytesRead);
++          byteBuffer.position(0);
+           // It's possible we've been shut down during the read, and stopRecording() tried and
+           // failed to join this thread. To be a bit safer, try to avoid calling any native methods
+           // in case they've been unregistered after stopRecording() returned.
+diff --git a/TMessagesProj/src/main/java/top/nkbe/niagram/config/NyaConfig.kt b/TMessagesProj/src/main/java/top/nkbe/niagram/config/NyaConfig.kt
+index 0a50560f..151dfc38 100644
+--- a/TMessagesProj/src/main/java/top/nkbe/niagram/config/NyaConfig.kt
++++ b/TMessagesProj/src/main/java/top/nkbe/niagram/config/NyaConfig.kt
+@@ -249,7 +249,7 @@ object NyaConfig {
+         addConfig(
+             "CustomTitle",
+             ConfigItem.configTypeString,
+-            "Niagram"
++            "ni12"
+         )
+     val dateOfForwardedMsg =
+         addConfig(
+@@ -758,7 +758,7 @@ object NyaConfig {
+     @JvmField val showIdAndDc = addConfig("ShowIdAndDc", ConfigItem.configTypeBool, true)
+ 
+     @JvmField val cachePath = addConfig("cache_path", ConfigItem.configTypeString, "")
+-    @JvmField val customSavePath = addConfig("customSavePath", ConfigItem.configTypeString, "Niagram")
++    @JvmField val customSavePath = addConfig("customSavePath", ConfigItem.configTypeString, "ni12gram")
+ 
+     @JvmField val translationProvider = addConfig("translationProvider", ConfigItem.configTypeInt, 1)
+     @JvmField val translateToLang = addConfig("TransToLang", ConfigItem.configTypeString, "")
 diff --git a/TMessagesProj/src/main/java/top/nkbe/niagram/settings/NekoAboutActivity.java b/TMessagesProj/src/main/java/top/nkbe/niagram/settings/NekoAboutActivity.java
 index aab4fb6f..58252ef5 100644
 --- a/TMessagesProj/src/main/java/top/nkbe/niagram/settings/NekoAboutActivity.java
@@ -22571,7 +22845,7 @@ zxQrL@92!qxL~#md3Y-t&IW(UHjZhHy5E@T{b{r}Sd;~9``6Os6kZ}Y@(0nSRw!rxY
 g4&enfEN6Hg&!h1qsKraLIDUJJ#c#1V+`z~IGgy;$JOBUy
 
 diff --git a/TMessagesProj/src/main/res/values-ar/strings.xml b/TMessagesProj/src/main/res/values-ar/strings.xml
-index ecfd8720..95671689 100644
+index ecfd8720..ee80edc1 100644
 --- a/TMessagesProj/src/main/res/values-ar/strings.xml
 +++ b/TMessagesProj/src/main/res/values-ar/strings.xml
 @@ -1,6 +1,6 @@
@@ -22582,7 +22856,7 @@ index ecfd8720..95671689 100644
      <string name="AppNameBeta">(Beta) تيليجرام</string>
      <string name="LanguageName">العربية</string>
      <string name="English">الإنجليزية</string>
-@@ -1243,4 +1243,9 @@
+@@ -1243,4 +1243,13 @@
      <string name="RemindTodayAt">\'ذكّرني اليوم عند\' HH:mm</string>
      <string name="RemindDayAt">\'ذكّرني بتاريخ\' d MMM \'عند\' HH:mm</string>
      <string name="RemindDayYearAt">\'ذكّرني بتاريخ\' d MMM yyyy \'عند\' HH:mm</string>
@@ -22591,8 +22865,72 @@ index ecfd8720..95671689 100644
 +    <string name="Ni12CreditsTitle">الحقوق والترخيص</string>
 +    <string name="Ni12SourceTitle">الكود المصدري لـ ni12gram</string>
 +    <string name="Ni12Credits">ni12gram نسخة معدّلة وغير رسمية من Niagram (https://github.com/HSSkyBoy/Niagram) المبنية على Nagram وNekogram وتطبيق تيليجرام للأندرويد.\n\nحقوق الكود الأصلي تبقى لأصحابها: مطوري تيليجرام للأندرويد وNekogram وNagram وNagramX وNiagram.\n\nالبرنامج حر ومرخّص برخصة GNU GPL الإصدار 3، وبدون أي ضمان. يحق لك إعادة توزيعه وفق شروط GPLv3. الكود المصدري لهذه النسخة متاح في https://github.com/malo39911-art/ni12gram-patch\n\nni12gram غير تابع لتيليجرام وغير معتمد أو مصدّق منه.</string>
++    <string name="Ni12VoiceChanger">تغيير الصوت</string>
++    <string name="Ni12VoiceOff">إيقاف</string>
++    <string name="Ni12VoiceRobot">روبوت (حديدي)</string>
++    <string name="Ni12VoiceAnon">مجهول (Anonymous)</string>
  </resources>
 \ No newline at end of file
+diff --git a/TMessagesProj/src/main/res/values-ar/strings_nia.xml b/TMessagesProj/src/main/res/values-ar/strings_nia.xml
+index 8638d399..8ba6eda4 100644
+--- a/TMessagesProj/src/main/res/values-ar/strings_nia.xml
++++ b/TMessagesProj/src/main/res/values-ar/strings_nia.xml
+@@ -9,7 +9,7 @@
+     <string name="SendReactions">إرسال التفاعلات</string>
+     <string name="ShowReactions">إظهار التفاعلات</string>
+     <string name="CustomTitle">عنوان مخصص</string>
+-    <string name="CustomTitleHint">اتركه فارغًا لاستخدام Niagram</string>
++    <string name="CustomTitleHint">اتركه فارغًا لاستخدام ni12</string>
+     <string name="CopyPhoto">نسخ الصورة</string>
+     <string name="PhotoCopied">تم نسخ الصورة إلى الحافظة</string>
+     <string name="ToTheBeginning">الانتقال إلى البداية</string>
+@@ -127,7 +127,7 @@
+     <string name="ForwardTextPlaceholder">نص الرسالة</string>
+     <string name="ForwardTextCopyNotice">ستُرسل كنسخة منك، دون إشارة إعادة التوجيه</string>
+     <string name="ForwardTextEmptyNotice">لا يمكن أن يكون نص الرسالة فارغًا</string>
+-    <string name="XChannel">قناة Niagram</string>
++    <string name="XChannel">قناة ni12</string>
+     <string name="EnableSaveDeletedMessages">حفظ الرسائل المحذوفة</string>
+     <string name="SpyMode">وضع التجسس</string>
+     <string name="SaveDeletedMessagesInPrivate">الدردشات الخاصة</string>
+@@ -469,8 +469,8 @@
+     <string name="BackAnimationSpring">نابضية</string>
+     <string name="BackAnimationPredictive">تنبُّئية</string>
+     <string name="AddToFilter">إضافة إلى المرشّح</string>
+-    <string name="UnifiedPushNeverReceivedNotifications">لم تُستلم أي إشعارات عبر UnifiedPush منذ تشغيل Niagram.</string>
+-    <string name="UnifiedPushLastReceivedNotification">وصل آخر إشعار عبر UnifiedPush قبل %1$d ثانية.\n\nعدد الإشعارات المستلمة منذ تشغيل Niagram: %2$d.</string>
++    <string name="UnifiedPushNeverReceivedNotifications">لم تُستلم أي إشعارات عبر UnifiedPush منذ تشغيل ni12.</string>
++    <string name="UnifiedPushLastReceivedNotification">وصل آخر إشعار عبر UnifiedPush قبل %1$d ثانية.\n\nعدد الإشعارات المستلمة منذ تشغيل ni12: %2$d.</string>
+     <string name="UnifiedPushCurrentEndpoint">نقطة نهاية UnifiedPush الحالية هي: %1$s</string>
+     <string name="PlayOnce">التشغيل مرة واحدة</string>
+     <string name="StorageSettings">التخزين</string>
+@@ -576,7 +576,7 @@
+     <!-- Verified Badge -->
+     <string name="VerifySelf">توثيق حسابي</string>
+     <string name="VerifySelfDetail">يعرض شارة توثيق على حسابك الحالي (محليًا فقط)</string>
+-    <string name="NiagramVerifiedOfficial">Niagram الرسمي</string>
++    <string name="ni12VerifiedOfficial">ni12 الرسمي</string>
+     <string name="NagramVerifiedDev">مطوّر Nagram</string>
+ 
+     <!-- Input Text Animations -->
+@@ -671,7 +671,7 @@
+     <string name="CallTo">الاتصال بـ **%1$s**؟</string>
+     <string name="DisableNumberRounding">تعطيل تقريب الأرقام</string>
+     <string name="Categories">الفئات</string>
+-    <string name="OfficialChannel">قناة إصدارات Niagram</string>
++    <string name="OfficialChannel">قناة إصدارات ni12</string>
+     <string name="About">حول</string>
+     <string name="SourceCode">الشيفرة المصدرية</string>
+     <string name="ResetStickerSize">إعادة تعيين حجم الملصقات</string>
+@@ -794,7 +794,7 @@
+     <string name="More">المزيد</string>
+     <string name="ShowIdAndDc">إظهار المعرّف / مركز البيانات في الملف الشخصي</string>
+     <string name="DialogsSettings">الدردشات</string>
+-    <string name="NiagramXPushService">خدمة الإشعارات الفورية</string>
++    <string name="ni12XPushService">خدمة الإشعارات الفورية</string>
+     <string name="DisableSystemAccount">تعطيل حساب النظام</string>
+     <string name="DisableProxyWhenVpnEnabled">تعطيل الوكيل عند تفعيل VPN</string>
+     <string name="SkipOpenLinkConfirm">تخطي تأكيد فتح الروابط</string>
 diff --git a/TMessagesProj/src/main/res/values-de/strings.xml b/TMessagesProj/src/main/res/values-de/strings.xml
 index 1a0206d7..46807eb0 100644
 --- a/TMessagesProj/src/main/res/values-de/strings.xml
@@ -22605,6 +22943,126 @@ index 1a0206d7..46807eb0 100644
      <string name="AppNameBeta">Niagram Beta</string>
      <string name="LanguageName">Deutsch</string>
      <string name="English">Englisch</string>
+diff --git a/TMessagesProj/src/main/res/values-de/strings_nia.xml b/TMessagesProj/src/main/res/values-de/strings_nia.xml
+index 3936f07f..e4b1d95b 100644
+--- a/TMessagesProj/src/main/res/values-de/strings_nia.xml
++++ b/TMessagesProj/src/main/res/values-de/strings_nia.xml
+@@ -9,7 +9,7 @@
+     <string name="SendReactions">Reaktionen senden</string>
+     <string name="ShowReactions">Reaktionen anzeigen</string>
+     <string name="CustomTitle">Eigener Titel</string>
+-    <string name="CustomTitleHint">Leer lassen, um Niagram zu verwenden</string>
++    <string name="CustomTitleHint">Leer lassen, um ni12 zu verwenden</string>
+     <string name="CopyPhoto">Foto kopieren</string>
+     <string name="PhotoCopied">Foto in die Zwischenablage kopiert</string>
+     <string name="ToTheBeginning">Zum Anfang</string>
+@@ -127,7 +127,7 @@
+     <string name="ForwardTextPlaceholder">Nachrichtentext</string>
+     <string name="ForwardTextCopyNotice">Wird als Kopie von dir ohne Weiterleitungshinweis gesendet</string>
+     <string name="ForwardTextEmptyNotice">Der Nachrichtentext darf nicht leer sein</string>
+-    <string name="XChannel">Niagram-Kanal</string>
++    <string name="XChannel">ni12-Kanal</string>
+     <string name="EnableSaveDeletedMessages">Gelöschte Nachrichten speichern</string>
+     <string name="SpyMode">Spion-Modus</string>
+     <string name="SaveDeletedMessagesInPrivate">Private Chats</string>
+@@ -469,8 +469,8 @@
+     <string name="BackAnimationSpring">Feder</string>
+     <string name="BackAnimationPredictive">Vorausschauend</string>
+     <string name="AddToFilter">Zum Filter hinzufügen</string>
+-    <string name="UnifiedPushNeverReceivedNotifications">Seit dem Start von Niagram wurden keine Benachrichtigungen über UnifiedPush empfangen.</string>
+-    <string name="UnifiedPushLastReceivedNotification">Die letzte Benachrichtigung über UnifiedPush kam vor %1$d Sekunden an.\n\nSeit dem Start von Niagram wurden %2$d Benachrichtigungen empfangen.</string>
++    <string name="UnifiedPushNeverReceivedNotifications">Seit dem Start von ni12 wurden keine Benachrichtigungen über UnifiedPush empfangen.</string>
++    <string name="UnifiedPushLastReceivedNotification">Die letzte Benachrichtigung über UnifiedPush kam vor %1$d Sekunden an.\n\nSeit dem Start von ni12 wurden %2$d Benachrichtigungen empfangen.</string>
+     <string name="UnifiedPushCurrentEndpoint">Der aktuelle UnifiedPush-Endpunkt ist: %1$s</string>
+     <string name="PlayOnce">Einmal abspielen</string>
+     <string name="StorageSettings">Speicher</string>
+@@ -576,7 +576,7 @@
+     <!-- Verified Badge -->
+     <string name="VerifySelf">Mich selbst verifizieren</string>
+     <string name="VerifySelfDetail">Zeigt ein Verifizierungs-Abzeichen für dein aktuelles Konto an (nur lokal)</string>
+-    <string name="NiagramVerifiedOfficial">Niagram Offiziell</string>
++    <string name="ni12VerifiedOfficial">ni12 Offiziell</string>
+     <string name="NagramVerifiedDev">Nagram-Entwickler</string>
+ 
+     <!-- Input Text Animations -->
+@@ -671,7 +671,7 @@
+     <string name="CallTo">**%1$s** anrufen?</string>
+     <string name="DisableNumberRounding">Zahlenrundung deaktivieren</string>
+     <string name="Categories">Kategorien</string>
+-    <string name="OfficialChannel">Niagram-Build-Kanal</string>
++    <string name="OfficialChannel">ni12-Build-Kanal</string>
+     <string name="About">Über</string>
+     <string name="SourceCode">Quellcode</string>
+     <string name="ResetStickerSize">Sticker-Größe zurücksetzen</string>
+@@ -794,7 +794,7 @@
+     <string name="More">Mehr</string>
+     <string name="ShowIdAndDc">ID / DC im Profil anzeigen</string>
+     <string name="DialogsSettings">Chats</string>
+-    <string name="NiagramXPushService">Push-Dienst</string>
++    <string name="ni12XPushService">Push-Dienst</string>
+     <string name="DisableSystemAccount">Systemkonto deaktivieren</string>
+     <string name="DisableProxyWhenVpnEnabled">Proxy bei aktivem VPN deaktivieren</string>
+     <string name="SkipOpenLinkConfirm">Bestätigung beim Öffnen von Links überspringen</string>
+diff --git a/TMessagesProj/src/main/res/values-es-rES/strings_nia.xml b/TMessagesProj/src/main/res/values-es-rES/strings_nia.xml
+index bcfc42cb..dca6791f 100644
+--- a/TMessagesProj/src/main/res/values-es-rES/strings_nia.xml
++++ b/TMessagesProj/src/main/res/values-es-rES/strings_nia.xml
+@@ -9,7 +9,7 @@
+     <string name="SendReactions">Enviar reacciones</string>
+     <string name="ShowReactions">Mostrar reacciones</string>
+     <string name="CustomTitle">Título personalizado</string>
+-    <string name="CustomTitleHint">Dejar en blanco para usar Niagram</string>
++    <string name="CustomTitleHint">Dejar en blanco para usar ni12</string>
+     <string name="CopyPhoto">Copiar foto</string>
+     <string name="PhotoCopied">Foto copiada al portapapeles</string>
+     <string name="ToTheBeginning">Saltar al inicio</string>
+@@ -127,7 +127,7 @@
+     <string name="ForwardTextCopyNotice">Se enviará como una copia tuya, sin etiqueta de reenvío</string>
+     <string name="ForwardTextEmptyNotice">El texto del mensaje no puede estar vacío</string>
+ 
+-    <string name="XChannel">Canal de Niagram</string>
++    <string name="XChannel">Canal de ni12</string>
+     <string name="EnableSaveDeletedMessages">Guardar mensajes eliminados</string>
+     <string name="SpyMode">Modo espía</string>
+     <string name="SaveDeletedMessagesInPrivate">Chats privados</string>
+@@ -469,8 +469,8 @@
+     <string name="BackAnimationSpring">Elástica</string>
+     <string name="BackAnimationPredictive">Predictiva</string>
+     <string name="AddToFilter">Añadir al filtro</string>
+-    <string name="UnifiedPushNeverReceivedNotifications">No se ha recibido ninguna notificación por UnifiedPush desde que se inició Niagram.</string>
+-    <string name="UnifiedPushLastReceivedNotification">La última notificación por UnifiedPush llegó hace %1$d segundos.\n\nSe han recibido %2$d notificaciones desde que se inició Niagram.</string>
++    <string name="UnifiedPushNeverReceivedNotifications">No se ha recibido ninguna notificación por UnifiedPush desde que se inició ni12.</string>
++    <string name="UnifiedPushLastReceivedNotification">La última notificación por UnifiedPush llegó hace %1$d segundos.\n\nSe han recibido %2$d notificaciones desde que se inició ni12.</string>
+     <string name="UnifiedPushCurrentEndpoint">El endpoint UnifiedPush actual es: %1$s</string>
+     <string name="PlayOnce">Reproducir una vez</string>
+     <string name="StorageSettings">Almacenamiento</string>
+@@ -570,7 +570,7 @@
+     <!-- Verified Badge -->
+     <string name="VerifySelf">Verificarme</string>
+     <string name="VerifySelfDetail">Muestra una insignia de verificación en tu cuenta actual (solo en local)</string>
+-    <string name="NiagramVerifiedOfficial">Oficial de Niagram</string>
++    <string name="ni12VerifiedOfficial">Oficial de ni12</string>
+     <string name="NagramVerifiedDev">Desarrollador de Nagram</string>
+ 
+     <!-- Input Text Animations -->
+@@ -653,7 +653,7 @@
+     <string name="CallTo">¿Llamar a **%1$s**?</string>
+     <string name="DisableNumberRounding">Desactivar redondeo numérico</string>
+     <string name="Categories">Categorías</string>
+-    <string name="OfficialChannel">Canal de versiones de Niagram</string>
++    <string name="OfficialChannel">Canal de versiones de ni12</string>
+     <string name="About">Acerca de</string>
+     <string name="SourceCode">Código fuente</string>
+     <string name="ResetStickerSize">Restablecer tamaño del sticker</string>
+@@ -776,7 +776,7 @@
+     <string name="More">Más</string>
+     <string name="ShowIdAndDc">Mostrar ID / DC en el perfil</string>
+     <string name="DialogsSettings">Chats</string>
+-    <string name="NiagramXPushService">Servicio Push</string>
++    <string name="ni12XPushService">Servicio Push</string>
+     <string name="DisableSystemAccount">Desactivar cuenta del sistema</string>
+     <string name="DisableProxyWhenVpnEnabled">Desactivar proxy cuando la VPN está habilitada</string>
+     <string name="DisableProxyWhenVpnEnabledDesc">Suspende automáticamente el proxy cuando se detecta una VPN del sistema. Nota: Cambiar de red (ej. de Wi-Fi a datos móviles) o reconectar la VPN puede reanudar el proxy momentáneamente.</string>
 diff --git a/TMessagesProj/src/main/res/values-es/strings.xml b/TMessagesProj/src/main/res/values-es/strings.xml
 index 96502fac..3dd8817f 100644
 --- a/TMessagesProj/src/main/res/values-es/strings.xml
@@ -22617,6 +23075,306 @@ index 96502fac..3dd8817f 100644
      <string name="AppNameBeta">Niagram Beta</string>
      <string name="LanguageName">Español</string>
      <string name="English">Inglés</string>
+diff --git a/TMessagesProj/src/main/res/values-es/strings_nia.xml b/TMessagesProj/src/main/res/values-es/strings_nia.xml
+index bcfc42cb..dca6791f 100644
+--- a/TMessagesProj/src/main/res/values-es/strings_nia.xml
++++ b/TMessagesProj/src/main/res/values-es/strings_nia.xml
+@@ -9,7 +9,7 @@
+     <string name="SendReactions">Enviar reacciones</string>
+     <string name="ShowReactions">Mostrar reacciones</string>
+     <string name="CustomTitle">Título personalizado</string>
+-    <string name="CustomTitleHint">Dejar en blanco para usar Niagram</string>
++    <string name="CustomTitleHint">Dejar en blanco para usar ni12</string>
+     <string name="CopyPhoto">Copiar foto</string>
+     <string name="PhotoCopied">Foto copiada al portapapeles</string>
+     <string name="ToTheBeginning">Saltar al inicio</string>
+@@ -127,7 +127,7 @@
+     <string name="ForwardTextCopyNotice">Se enviará como una copia tuya, sin etiqueta de reenvío</string>
+     <string name="ForwardTextEmptyNotice">El texto del mensaje no puede estar vacío</string>
+ 
+-    <string name="XChannel">Canal de Niagram</string>
++    <string name="XChannel">Canal de ni12</string>
+     <string name="EnableSaveDeletedMessages">Guardar mensajes eliminados</string>
+     <string name="SpyMode">Modo espía</string>
+     <string name="SaveDeletedMessagesInPrivate">Chats privados</string>
+@@ -469,8 +469,8 @@
+     <string name="BackAnimationSpring">Elástica</string>
+     <string name="BackAnimationPredictive">Predictiva</string>
+     <string name="AddToFilter">Añadir al filtro</string>
+-    <string name="UnifiedPushNeverReceivedNotifications">No se ha recibido ninguna notificación por UnifiedPush desde que se inició Niagram.</string>
+-    <string name="UnifiedPushLastReceivedNotification">La última notificación por UnifiedPush llegó hace %1$d segundos.\n\nSe han recibido %2$d notificaciones desde que se inició Niagram.</string>
++    <string name="UnifiedPushNeverReceivedNotifications">No se ha recibido ninguna notificación por UnifiedPush desde que se inició ni12.</string>
++    <string name="UnifiedPushLastReceivedNotification">La última notificación por UnifiedPush llegó hace %1$d segundos.\n\nSe han recibido %2$d notificaciones desde que se inició ni12.</string>
+     <string name="UnifiedPushCurrentEndpoint">El endpoint UnifiedPush actual es: %1$s</string>
+     <string name="PlayOnce">Reproducir una vez</string>
+     <string name="StorageSettings">Almacenamiento</string>
+@@ -570,7 +570,7 @@
+     <!-- Verified Badge -->
+     <string name="VerifySelf">Verificarme</string>
+     <string name="VerifySelfDetail">Muestra una insignia de verificación en tu cuenta actual (solo en local)</string>
+-    <string name="NiagramVerifiedOfficial">Oficial de Niagram</string>
++    <string name="ni12VerifiedOfficial">Oficial de ni12</string>
+     <string name="NagramVerifiedDev">Desarrollador de Nagram</string>
+ 
+     <!-- Input Text Animations -->
+@@ -653,7 +653,7 @@
+     <string name="CallTo">¿Llamar a **%1$s**?</string>
+     <string name="DisableNumberRounding">Desactivar redondeo numérico</string>
+     <string name="Categories">Categorías</string>
+-    <string name="OfficialChannel">Canal de versiones de Niagram</string>
++    <string name="OfficialChannel">Canal de versiones de ni12</string>
+     <string name="About">Acerca de</string>
+     <string name="SourceCode">Código fuente</string>
+     <string name="ResetStickerSize">Restablecer tamaño del sticker</string>
+@@ -776,7 +776,7 @@
+     <string name="More">Más</string>
+     <string name="ShowIdAndDc">Mostrar ID / DC en el perfil</string>
+     <string name="DialogsSettings">Chats</string>
+-    <string name="NiagramXPushService">Servicio Push</string>
++    <string name="ni12XPushService">Servicio Push</string>
+     <string name="DisableSystemAccount">Desactivar cuenta del sistema</string>
+     <string name="DisableProxyWhenVpnEnabled">Desactivar proxy cuando la VPN está habilitada</string>
+     <string name="DisableProxyWhenVpnEnabledDesc">Suspende automáticamente el proxy cuando se detecta una VPN del sistema. Nota: Cambiar de red (ej. de Wi-Fi a datos móviles) o reconectar la VPN puede reanudar el proxy momentáneamente.</string>
+diff --git a/TMessagesProj/src/main/res/values-fa-rIR/strings_nia.xml b/TMessagesProj/src/main/res/values-fa-rIR/strings_nia.xml
+index e471f990..367ded52 100644
+--- a/TMessagesProj/src/main/res/values-fa-rIR/strings_nia.xml
++++ b/TMessagesProj/src/main/res/values-fa-rIR/strings_nia.xml
+@@ -9,7 +9,7 @@
+     <string name="SendReactions">ارسال واکنش‌ها</string>
+     <string name="ShowReactions">نمایش واکنش‌ها</string>
+     <string name="CustomTitle">عنوان سفارشی</string>
+-    <string name="CustomTitleHint">خالی بگذارید تا از Niagram استفاده شود</string>
++    <string name="CustomTitleHint">خالی بگذارید تا از ni12 استفاده شود</string>
+     <string name="CopyPhoto">کپی‌ کردن عکس</string>
+     <string name="PhotoCopied">عکس در کلیپ‌بورد کپی شد</string>
+     <string name="ToTheBeginning">رفتن به ابتدا</string>
+@@ -127,7 +127,7 @@
+     <string name="ForwardTextCopyNotice">به صورت یک کپی از طرف شما و بدون برچسب فوروارد ارسال خواهد شد</string>
+     <string name="ForwardTextEmptyNotice">متن پیام نمی‌تواند خالی باشد</string>
+ 
+-    <string name="XChannel">کانال Niagram</string>
++    <string name="XChannel">کانال ni12</string>
+     <string name="EnableSaveDeletedMessages">ذخیره پیام‌های حذف‌شده</string>
+     <string name="SpyMode">حالت جاسوسی</string>
+     <string name="SaveDeletedMessagesInPrivate">گفتگوهای خصوصی</string>
+@@ -469,8 +469,8 @@
+     <string name="BackAnimationSpring">فنری</string>
+     <string name="BackAnimationPredictive">پیش‌بینی کننده</string>
+     <string name="AddToFilter">اضافه کردن به فیلتر</string>
+-    <string name="UnifiedPushNeverReceivedNotifications">از زمان اجرای Niagram تاکنون هیچ اعلانی از طریق UnifiedPush دریافت نشده است.</string>
+-    <string name="UnifiedPushLastReceivedNotification">آخرین اعلان از طریق UnifiedPush، %1$d ثانیه پیش دریافت شد.\n\nاز زمان اجرای Niagram، %2$d اعلان دریافت شده است.</string>
++    <string name="UnifiedPushNeverReceivedNotifications">از زمان اجرای ni12 تاکنون هیچ اعلانی از طریق UnifiedPush دریافت نشده است.</string>
++    <string name="UnifiedPushLastReceivedNotification">آخرین اعلان از طریق UnifiedPush، %1$d ثانیه پیش دریافت شد.\n\nاز زمان اجرای ni12، %2$d اعلان دریافت شده است.</string>
+     <string name="UnifiedPushCurrentEndpoint">نقطه پایانی فعلی UnifiedPush عبارت است از: %1$s</string>
+     <string name="PlayOnce">یک بار پخش</string>
+     <string name="StorageSettings">فضای ذخیره‌‌سازی</string>
+@@ -570,7 +570,7 @@
+     <!-- Verified Badge -->
+     <string name="VerifySelf">تأیید خودم</string>
+     <string name="VerifySelfDetail">نمایش نشان تأیید روی حساب فعلی شما (فقط محلی)</string>
+-    <string name="NiagramVerifiedOfficial">رسمی Niagram</string>
++    <string name="ni12VerifiedOfficial">رسمی ni12</string>
+     <string name="NagramVerifiedDev">توسعه‌دهنده Nagram</string>
+ 
+     <!-- Input Text Animations -->
+@@ -653,7 +653,7 @@
+     <string name="CallTo">با **%1$s** تماس گرفته شود؟</string>
+     <string name="DisableNumberRounding">غیرفعال کردن گرد کردن اعداد</string>
+     <string name="Categories">دسته‌بندی‌ها</string>
+-    <string name="OfficialChannel">کانال بیلدهای Niagram</string>
++    <string name="OfficialChannel">کانال بیلدهای ni12</string>
+     <string name="About">درباره</string>
+     <string name="SourceCode">کد منبع</string>
+     <string name="ResetStickerSize">بازنشانی اندازه استیکر</string>
+@@ -776,7 +776,7 @@
+     <string name="More">بیشتر</string>
+     <string name="ShowIdAndDc">نمایش شناسه (ID) / دیتاسنتر (DC) در پروفایل</string>
+     <string name="DialogsSettings">گفتگوها</string>
+-    <string name="NiagramXPushService">سرویس اعلان</string>
++    <string name="ni12XPushService">سرویس اعلان</string>
+     <string name="DisableSystemAccount">غیرفعال کردن حساب سیستمی</string>
+     <string name="DisableProxyWhenVpnEnabled">غیرفعال کردن پروکسی هنگام روشن بودن VPN</string>
+     <string name="DisableProxyWhenVpnEnabledDesc">هنگام شناسایی VPN سیستم، پروکسی را به طور خودکار به حالت تعلیق درآورید. توجه: تغییر شبکه (مثلاً Wi-Fi به داده تلفن همراه) یا اتصال مجدد VPN ممکن است باعث فعال شدن مجدد موقت پروکسی شود.</string>
+diff --git a/TMessagesProj/src/main/res/values-fr/strings_nia.xml b/TMessagesProj/src/main/res/values-fr/strings_nia.xml
+index 0cb3047a..d1b0b355 100644
+--- a/TMessagesProj/src/main/res/values-fr/strings_nia.xml
++++ b/TMessagesProj/src/main/res/values-fr/strings_nia.xml
+@@ -9,7 +9,7 @@
+     <string name="SendReactions">Envoyer des réactions</string>
+     <string name="ShowReactions">Afficher les réactions</string>
+     <string name="CustomTitle">Titre personnalisé</string>
+-    <string name="CustomTitleHint">Laisser vide pour utiliser Niagram</string>
++    <string name="CustomTitleHint">Laisser vide pour utiliser ni12</string>
+     <string name="CopyPhoto">Copier la photo</string>
+     <string name="PhotoCopied">Photo copiée dans le presse-papiers</string>
+     <string name="ToTheBeginning">Aller au début</string>
+@@ -33,7 +33,7 @@
+     <string name="ForwardTextPlaceholder">Texte du message</string>
+     <string name="ForwardTextCopyNotice">Sera envoyé comme une copie de votre part, sans étiquette de transfert</string>
+     <string name="ForwardTextEmptyNotice">Le texte du message ne peut pas être vide</string>
+-    <string name="XChannel">Canal Niagram</string>
++    <string name="XChannel">Canal ni12</string>
+     <string name="EnableSaveDeletedMessages">Conserver les messages supprimés</string>
+     <string name="SpyMode">Mode espion</string>
+     <string name="SaveDeletedMessagesInPrivate">Discussions privées</string>
+@@ -227,7 +227,7 @@
+     <!-- Verified Badge -->
+     <string name="VerifySelf">Se certifier</string>
+     <string name="VerifySelfDetail">Affiche localement un badge de certification exclusif pour votre compte actuel</string>
+-    <string name="NiagramVerifiedOfficial">Officiel Niagram</string>
++    <string name="ni12VerifiedOfficial">Officiel ni12</string>
+     <string name="NagramVerifiedDev">Développeur Nagram</string>
+ 
+     <!-- Input Text Animations -->
+@@ -316,7 +316,7 @@
+     <string name="CallTo">Appeler **%1$s** ?</string>
+     <string name="DisableNumberRounding">Désactiver l\'arrondi des nombres</string>
+     <string name="Categories">Catégories</string>
+-    <string name="OfficialChannel">Canal des versions Niagram</string>
++    <string name="OfficialChannel">Canal des versions ni12</string>
+     <string name="About">À propos</string>
+     <string name="SourceCode">Code source</string>
+     <string name="ResetStickerSize">Réinitialiser la taille des stickers</string>
+@@ -439,7 +439,7 @@
+     <string name="More">Plus</string>
+     <string name="ShowIdAndDc">Afficher l\'ID et le DC dans le profil</string>
+     <string name="DialogsSettings">Discussions</string>
+-    <string name="NiagramXPushService">Service push</string>
++    <string name="ni12XPushService">Service push</string>
+     <string name="DisableSystemAccount">Désactiver le compte système</string>
+ 
+     <string name="DisableProxyWhenVpnEnabled">Désactiver le proxy lorsque le VPN est activé</string>
+@@ -759,8 +759,8 @@
+     <string name="BackAnimationSpring">À ressort</string>
+     <string name="BackAnimationPredictive">Prédictive</string>
+     <string name="AddToFilter">Ajouter au filtre</string>
+-    <string name="UnifiedPushNeverReceivedNotifications">Aucune notification n\'a été reçue via UnifiedPush depuis le démarrage de Niagram.</string>
+-    <string name="UnifiedPushLastReceivedNotification">La dernière notification reçue via UnifiedPush date d\'il y a %1$d secondes.\n\n%2$d notifications reçues depuis le démarrage de Niagram.</string>
++    <string name="UnifiedPushNeverReceivedNotifications">Aucune notification n\'a été reçue via UnifiedPush depuis le démarrage de ni12.</string>
++    <string name="UnifiedPushLastReceivedNotification">La dernière notification reçue via UnifiedPush date d\'il y a %1$d secondes.\n\n%2$d notifications reçues depuis le démarrage de ni12.</string>
+     <string name="UnifiedPushCurrentEndpoint">Le point de terminaison UnifiedPush actuel est : %1$s</string>
+     <string name="PlayOnce">Lire une seule fois</string>
+     <string name="StorageSettings">Stockage</string>
+diff --git a/TMessagesProj/src/main/res/values-in-rID/strings_nia.xml b/TMessagesProj/src/main/res/values-in-rID/strings_nia.xml
+index ea70b42e..2efc5e42 100644
+--- a/TMessagesProj/src/main/res/values-in-rID/strings_nia.xml
++++ b/TMessagesProj/src/main/res/values-in-rID/strings_nia.xml
+@@ -9,7 +9,7 @@
+     <string name="SendReactions">Kirim Reaksi</string>
+     <string name="ShowReactions">Tampilkan Reaksi</string>
+     <string name="CustomTitle">Judul Khusus</string>
+-    <string name="CustomTitleHint">Biarkan kosong untuk menggunakan Niagram</string>
++    <string name="CustomTitleHint">Biarkan kosong untuk menggunakan ni12</string>
+     <string name="CopyPhoto">Salin Foto</string>
+     <string name="PhotoCopied">Foto disalin ke papan klip</string>
+     <string name="ToTheBeginning">Ke Awal</string>
+@@ -127,7 +127,7 @@
+     <string name="ForwardTextCopyNotice">Akan dikirim sebagai salinan dari Anda, tanpa label diteruskan</string>
+     <string name="ForwardTextEmptyNotice">Teks pesan tidak boleh kosong</string>
+ 
+-    <string name="XChannel">Saluran Niagram</string>
++    <string name="XChannel">Saluran ni12</string>
+     <string name="EnableSaveDeletedMessages">Simpan Pesan yang Dihapus</string>
+     <string name="SpyMode">Mode Mata-mata</string>
+     <string name="SaveDeletedMessagesInPrivate">Obrolan Pribadi</string>
+@@ -469,8 +469,8 @@
+     <string name="BackAnimationSpring">Pegas</string>
+     <string name="BackAnimationPredictive">Prediktif</string>
+     <string name="AddToFilter">Tambah ke Penyaring</string>
+-    <string name="UnifiedPushNeverReceivedNotifications">Belum ada pemberitahuan yang diterima melalui UnifiedPush sejak Niagram dimulai.</string>
+-    <string name="UnifiedPushLastReceivedNotification">Pemberitahuan terakhir melalui UnifiedPush diterima %1$d detik yang lalu.\n\n%2$d pemberitahuan diterima sejak Niagram dimulai.</string>
++    <string name="UnifiedPushNeverReceivedNotifications">Belum ada pemberitahuan yang diterima melalui UnifiedPush sejak ni12 dimulai.</string>
++    <string name="UnifiedPushLastReceivedNotification">Pemberitahuan terakhir melalui UnifiedPush diterima %1$d detik yang lalu.\n\n%2$d pemberitahuan diterima sejak ni12 dimulai.</string>
+     <string name="UnifiedPushCurrentEndpoint">Titik akhir UnifiedPush saat ini adalah: %1$s</string>
+     <string name="PlayOnce">Putar sekali</string>
+     <string name="StorageSettings">Penyimpanan</string>
+@@ -570,7 +570,7 @@
+     <!-- Verified Badge -->
+     <string name="VerifySelf">Verifikasi Saya</string>
+     <string name="VerifySelfDetail">Tampilkan lencana terverifikasi di akun Anda saat ini (hanya lokal)</string>
+-    <string name="NiagramVerifiedOfficial">Resmi Niagram</string>
++    <string name="ni12VerifiedOfficial">Resmi ni12</string>
+     <string name="NagramVerifiedDev">Pengembang Nagram</string>
+ 
+     <!-- Input Text Animations -->
+@@ -653,7 +653,7 @@
+     <string name="CallTo">Telepon **%1$s**?</string>
+     <string name="DisableNumberRounding">Nonaktifkan Pembulatan Angka</string>
+     <string name="Categories">Kategori</string>
+-    <string name="OfficialChannel">Saluran Build Niagram</string>
++    <string name="OfficialChannel">Saluran Build ni12</string>
+     <string name="About">Tentang</string>
+     <string name="SourceCode">Kode Sumber</string>
+     <string name="ResetStickerSize">Atur ulang ukuran stiker</string>
+@@ -776,7 +776,7 @@
+     <string name="More">Selengkapnya</string>
+     <string name="ShowIdAndDc">Tampilkan ID / DC di Profil</string>
+     <string name="DialogsSettings">Obrolan</string>
+-    <string name="NiagramXPushService">Layanan Push</string>
++    <string name="ni12XPushService">Layanan Push</string>
+     <string name="DisableSystemAccount">Nonaktifkan Akun Sistem</string>
+     <string name="DisableProxyWhenVpnEnabled">Nonaktifkan Proksi Saat VPN Diaktifkan</string>
+     <string name="DisableProxyWhenVpnEnabledDesc">Tangguhkan proksi secara otomatis saat VPN sistem terdeteksi. Catatan: Beralih jaringan (misal: Wi-Fi ke data seluler) atau menyambung ulang VPN dapat menyebabkan proksi aktif kembali untuk sementara.</string>
+diff --git a/TMessagesProj/src/main/res/values-it-rIT/strings_nia.xml b/TMessagesProj/src/main/res/values-it-rIT/strings_nia.xml
+index 7e00f10f..53345442 100644
+--- a/TMessagesProj/src/main/res/values-it-rIT/strings_nia.xml
++++ b/TMessagesProj/src/main/res/values-it-rIT/strings_nia.xml
+@@ -9,7 +9,7 @@
+     <string name="SendReactions">Manda Reazioni</string>
+     <string name="ShowReactions">Mostra Reazioni</string>
+     <string name="CustomTitle">Titolo Personalizzato</string>
+-    <string name="CustomTitleHint">Lascia vuoto per usare Niagram</string>
++    <string name="CustomTitleHint">Lascia vuoto per usare ni12</string>
+     <string name="CopyPhoto">Copia foto</string>
+     <string name="PhotoCopied">Foto copiata negli appunti</string>
+     <string name="ToTheBeginning">All\'inizio</string>
+@@ -127,7 +127,7 @@
+     <string name="ForwardTextCopyNotice">Verrà inviato come copia a tuo nome, senza etichetta di inoltro</string>
+     <string name="ForwardTextEmptyNotice">Il testo del messaggio non può essere vuoto</string>
+ 
+-    <string name="XChannel">Canale Niagram</string>
++    <string name="XChannel">Canale ni12</string>
+     <string name="EnableSaveDeletedMessages">Salva i messaggi eliminati</string>
+     <string name="SpyMode">Modalità spia</string>
+     <string name="SaveDeletedMessagesInPrivate">Chat private</string>
+@@ -469,8 +469,8 @@
+     <string name="BackAnimationSpring">Elastica</string>
+     <string name="BackAnimationPredictive">Predittiva</string>
+     <string name="AddToFilter">Aggiungi al filtro</string>
+-    <string name="UnifiedPushNeverReceivedNotifications">Nessuna notifica ricevuta tramite UnifiedPush dall\'avvio di Niagram.</string>
+-    <string name="UnifiedPushLastReceivedNotification">L\'ultima notifica tramite UnifiedPush è arrivata %1$d secondi fa.\n\n%2$d notifiche ricevute dall\'avvio di Niagram.</string>
++    <string name="UnifiedPushNeverReceivedNotifications">Nessuna notifica ricevuta tramite UnifiedPush dall\'avvio di ni12.</string>
++    <string name="UnifiedPushLastReceivedNotification">L\'ultima notifica tramite UnifiedPush è arrivata %1$d secondi fa.\n\n%2$d notifiche ricevute dall\'avvio di ni12.</string>
+     <string name="UnifiedPushCurrentEndpoint">L\'endpoint UnifiedPush corrente è: %1$s</string>
+     <string name="PlayOnce">Riproduci una volta</string>
+     <string name="StorageSettings">Archiviazione</string>
+@@ -570,7 +570,7 @@
+     <!-- Verified Badge -->
+     <string name="VerifySelf">Verificami</string>
+     <string name="VerifySelfDetail">Mostra un badge di verifica sul tuo account attuale (solo in locale)</string>
+-    <string name="NiagramVerifiedOfficial">Ufficiale Niagram</string>
++    <string name="ni12VerifiedOfficial">Ufficiale ni12</string>
+     <string name="NagramVerifiedDev">Sviluppatore Nagram</string>
+ 
+     <!-- Input Text Animations -->
+@@ -653,7 +653,7 @@
+     <string name="CallTo">Chiamare **%1$s**?</string>
+     <string name="DisableNumberRounding">Disabilita l\'arrotondamento dei numeri</string>
+     <string name="Categories">Categorie</string>
+-    <string name="OfficialChannel">Canale delle build di Niagram</string>
++    <string name="OfficialChannel">Canale delle build di ni12</string>
+     <string name="About">Informazioni</string>
+     <string name="SourceCode">Codice Sorgente</string>
+     <string name="ResetStickerSize">Reimposta la dimensione dello sticker</string>
+@@ -776,7 +776,7 @@
+     <string name="More">Altro</string>
+     <string name="ShowIdAndDc">Mostra ID / DC nel profilo</string>
+     <string name="DialogsSettings">Chat</string>
+-    <string name="NiagramXPushService">Servizio Push</string>
++    <string name="ni12XPushService">Servizio Push</string>
+     <string name="DisableSystemAccount">Disabilita account di sistema</string>
+     <string name="DisableProxyWhenVpnEnabled">Disabilita il proxy quando la VPN è attiva</string>
+     <string name="DisableProxyWhenVpnEnabledDesc">Sospende automaticamente il proxy quando viene rilevata una VPN di sistema. Nota: Il cambio di rete (es. da Wi-Fi a dati mobili) o la riconnessione della VPN potrebbero riattivare temporaneamente il proxy.</string>
 diff --git a/TMessagesProj/src/main/res/values-it/strings.xml b/TMessagesProj/src/main/res/values-it/strings.xml
 index 2baa7d0f..1b83a4ff 100644
 --- a/TMessagesProj/src/main/res/values-it/strings.xml
@@ -22629,6 +23387,57 @@ index 2baa7d0f..1b83a4ff 100644
      <string name="AppNameBeta">Telegram Beta</string>
      <string name="LanguageName">Italiano</string>
      <string name="English">Inglese</string>
+diff --git a/TMessagesProj/src/main/res/values-ja-rJP/strings_nia.xml b/TMessagesProj/src/main/res/values-ja-rJP/strings_nia.xml
+index 7e0a62cf..aacea212 100644
+--- a/TMessagesProj/src/main/res/values-ja-rJP/strings_nia.xml
++++ b/TMessagesProj/src/main/res/values-ja-rJP/strings_nia.xml
+@@ -9,7 +9,7 @@
+     <string name="SendReactions">リアクションを送信</string>
+     <string name="ShowReactions">リアクションメニューを表示</string>
+     <string name="CustomTitle">カスタムタイトル</string>
+-    <string name="CustomTitleHint">空白のままにすると、Niagram が使用されます</string>
++    <string name="CustomTitleHint">空白のままにすると、ni12 が使用されます</string>
+     <string name="CopyPhoto">画像をコピー</string>
+     <string name="PhotoCopied">画像がクリップボードにコピーされました</string>
+     <string name="ToTheBeginning">先頭に戻る</string>
+@@ -115,7 +115,7 @@
+     <string name="ForwardTextCopyNotice">転送元ラベルなしで、あなたからのコピーとして送信されます</string>
+     <string name="ForwardTextEmptyNotice">メッセージ本文を空にすることはできません</string>
+ 
+-    <string name="XChannel">Niagram チャンネル</string>
++    <string name="XChannel">ni12 チャンネル</string>
+     <string name="EnableSaveDeletedMessages">削除済みメッセージを保存</string>
+     <string name="DeletedMessage">削除済み</string>
+     <string name="EnableSaveEditsHistory">編集履歴を保存</string>
+@@ -421,8 +421,8 @@
+     <string name="BackAnimationSpring">スプリング</string>
+     <string name="BackAnimationPredictive">予測型</string>
+     <string name="AddToFilter">フィルターに追加</string>
+-    <string name="UnifiedPushNeverReceivedNotifications">Niagram の起動以降、UnifiedPush 経由で通知を受信したことはありません。</string>
+-    <string name="UnifiedPushLastReceivedNotification">UnifiedPush で最後に受信した通知は %1$d 秒前です。\n\nNiagram の起動以降、 %2$d 件の通知を受信しました。</string>
++    <string name="UnifiedPushNeverReceivedNotifications">ni12 の起動以降、UnifiedPush 経由で通知を受信したことはありません。</string>
++    <string name="UnifiedPushLastReceivedNotification">UnifiedPush で最後に受信した通知は %1$d 秒前です。\n\nni12 の起動以降、 %2$d 件の通知を受信しました。</string>
+     <string name="UnifiedPushCurrentEndpoint">現在の UnifiedPush エンドポイントは：%1$s</string>
+     <string name="PlayOnce">ワンショット</string>
+     <string name="StorageSettings">ストレージ</string>
+@@ -483,7 +483,7 @@
+     <!-- Verified Badge -->
+     <string name="VerifySelf">自身を認証済みにする</string>
+     <string name="VerifySelfDetail">現在のアカウントにローカルで専用の認証バッジを表示します</string>
+-    <string name="NiagramVerifiedOfficial">Niagram 公式</string>
++    <string name="ni12VerifiedOfficial">ni12 公式</string>
+     <string name="NagramVerifiedDev">Nagram 開発者</string>
+ 
+     <!-- Input Text Animations -->
+@@ -687,7 +687,7 @@
+     <string name="More">もっと見る</string>
+     <string name="ShowIdAndDc">プロファイルに ID / DC を表示</string>
+     <string name="DialogsSettings">チャット</string>
+-    <string name="NiagramXPushService">プッシュ通知サービス</string>
++    <string name="ni12XPushService">プッシュ通知サービス</string>
+     <string name="DisableSystemAccount">システムアカウントを無効化</string>
+     <string name="DisableProxyWhenVpnEnabled">VPN が有効な場合プロキシを無効化</string>
+     <string name="DisableProxyWhenVpnEnabledDesc">システム VPN を検出したときにプロキシを自動的に一時停止します。注意: ネットワークの切り替え（Wi-Fi からモバイル通信など）や VPN の再接続時に、一時的にプロキシが復帰することがあります。</string>
 diff --git a/TMessagesProj/src/main/res/values-ko/strings.xml b/TMessagesProj/src/main/res/values-ko/strings.xml
 index abf0db07..698715e2 100644
 --- a/TMessagesProj/src/main/res/values-ko/strings.xml
@@ -22641,6 +23450,66 @@ index abf0db07..698715e2 100644
      <string name="AppNameBeta">텔레그램</string>
      <string name="LanguageName">한국어</string>
      <string name="English">영어</string>
+diff --git a/TMessagesProj/src/main/res/values-ko/strings_nia.xml b/TMessagesProj/src/main/res/values-ko/strings_nia.xml
+index 0294f613..904c8bf7 100644
+--- a/TMessagesProj/src/main/res/values-ko/strings_nia.xml
++++ b/TMessagesProj/src/main/res/values-ko/strings_nia.xml
+@@ -9,7 +9,7 @@
+     <string name="SendReactions">반응 보내기</string>
+     <string name="ShowReactions">반응 표시</string>
+     <string name="CustomTitle">사용자 지정 제목</string>
+-    <string name="CustomTitleHint">비워 두면 Niagram 을 사용합니다</string>
++    <string name="CustomTitleHint">비워 두면 ni12 을 사용합니다</string>
+     <string name="CopyPhoto">사진 복사</string>
+     <string name="PhotoCopied">사진을 클립보드에 복사했습니다</string>
+     <string name="ToTheBeginning">처음으로</string>
+@@ -107,7 +107,7 @@
+     <string name="ForwardTextCopyNotice">전달 라벨 없이 본인 명의의 복사본으로 전송됩니다</string>
+     <string name="ForwardTextEmptyNotice">메시지 텍스트는 비워둘 수 없습니다</string>
+ 
+-    <string name="XChannel">Niagram 채널</string>
++    <string name="XChannel">ni12 채널</string>
+     <string name="EnableSaveDeletedMessages">삭제된 메시지 저장</string>
+     <string name="DeletedMessage">삭제됨</string>
+     <string name="EnableSaveEditsHistory">수정 기록 저장</string>
+@@ -413,8 +413,8 @@
+     <string name="BackAnimationSpring">스프링</string>
+     <string name="BackAnimationPredictive">예측형</string>
+     <string name="AddToFilter">필터에 추가</string>
+-    <string name="UnifiedPushNeverReceivedNotifications">Niagram이 시작된 이후 UnifiedPush로 알림을 받은 적이 없습니다.</string>
+-    <string name="UnifiedPushLastReceivedNotification">마지막으로 UnifiedPush 알림을 받은 것은 %1$d초 전입니다.\n\nNiagram이 시작된 이후 %2$d개의 알림을 받았습니다.</string>
++    <string name="UnifiedPushNeverReceivedNotifications">ni12이 시작된 이후 UnifiedPush로 알림을 받은 적이 없습니다.</string>
++    <string name="UnifiedPushLastReceivedNotification">마지막으로 UnifiedPush 알림을 받은 것은 %1$d초 전입니다.\n\nni12이 시작된 이후 %2$d개의 알림을 받았습니다.</string>
+     <string name="UnifiedPushCurrentEndpoint">현재 UnifiedPush 엔드포인트: %1$s</string>
+     <string name="PlayOnce">한 번 재생</string>
+     <string name="StorageSettings">저장소</string>
+@@ -476,7 +476,7 @@
+     <!-- Verified Badge -->
+     <string name="VerifySelf">본인 인증 배지 켜기</string>
+     <string name="VerifySelfDetail">현재 계정에 로컬 전용 인증 배지를 표시합니다</string>
+-    <string name="NiagramVerifiedOfficial">Niagram 공식</string>
++    <string name="ni12VerifiedOfficial">ni12 공식</string>
+     <string name="NagramVerifiedDev">Nagram 개발자</string>
+ 
+     <!-- Input Text Animations -->
+@@ -558,7 +558,7 @@
+     <string name="CallTo">**%1$s**에게 전화할까요?</string>
+     <string name="DisableNumberRounding">숫자 반올림 끄기</string>
+     <string name="Categories">카테고리</string>
+-    <string name="OfficialChannel">Niagram 빌드 채널</string>
++    <string name="OfficialChannel">ni12 빌드 채널</string>
+     <string name="About">정보</string>
+     <string name="SourceCode">소스 코드</string>
+     <string name="ResetStickerSize">스티커 크기 초기화</string>
+@@ -680,7 +680,7 @@
+     <string name="More">더보기</string>
+     <string name="ShowIdAndDc">프로필에 ID / DC 표시</string>
+     <string name="DialogsSettings">채팅</string>
+-    <string name="NiagramXPushService">푸시 서비스</string>
++    <string name="ni12XPushService">푸시 서비스</string>
+     <string name="DisableSystemAccount">시스템 계정 끄기</string>
+     <string name="DisableProxyWhenVpnEnabled">VPN이 켜져 있으면 프록시 끄기</string>
+     <string name="DisableProxyWhenVpnEnabledDesc">시스템 VPN 감지 시 프록시를 자동으로 일시 중지합니다. 참고: 네트워크 전환(예: Wi-Fi에서 모바일 데이터로) 또는 VPN 재연결 시 일시적으로 프록시가 다시 활성화될 수 있습니다.</string>
 diff --git a/TMessagesProj/src/main/res/values-nl/strings.xml b/TMessagesProj/src/main/res/values-nl/strings.xml
 index a4b24c9a..ce5f220f 100644
 --- a/TMessagesProj/src/main/res/values-nl/strings.xml
@@ -22653,6 +23522,126 @@ index a4b24c9a..ce5f220f 100644
      <string name="AppNameBeta">Telegram-bèta</string>
      <string name="LanguageName">Nederlands</string>
      <string name="English">Engels</string>
+diff --git a/TMessagesProj/src/main/res/values-nl/strings_nia.xml b/TMessagesProj/src/main/res/values-nl/strings_nia.xml
+index 6e498c7c..af83415c 100644
+--- a/TMessagesProj/src/main/res/values-nl/strings_nia.xml
++++ b/TMessagesProj/src/main/res/values-nl/strings_nia.xml
+@@ -9,7 +9,7 @@
+     <string name="SendReactions">Reacties sturen</string>
+     <string name="ShowReactions">Reacties tonen</string>
+     <string name="CustomTitle">Aangepaste titel</string>
+-    <string name="CustomTitleHint">Leeg laten om Niagram te gebruiken</string>
++    <string name="CustomTitleHint">Leeg laten om ni12 te gebruiken</string>
+     <string name="CopyPhoto">Foto kopiëren</string>
+     <string name="PhotoCopied">Foto gekopieerd naar klembord</string>
+     <string name="ToTheBeginning">Naar het begin</string>
+@@ -127,7 +127,7 @@
+     <string name="ForwardTextPlaceholder">Berichttekst</string>
+     <string name="ForwardTextCopyNotice">Wordt als kopie van jou verstuurd, zonder doorstuurlabel</string>
+     <string name="ForwardTextEmptyNotice">Berichttekst mag niet leeg zijn</string>
+-    <string name="XChannel">Niagram-kanaal</string>
++    <string name="XChannel">ni12-kanaal</string>
+     <string name="EnableSaveDeletedMessages">Verwijderde berichten bewaren</string>
+     <string name="SpyMode">Spionmodus</string>
+     <string name="SaveDeletedMessagesInPrivate">Privéchats</string>
+@@ -469,8 +469,8 @@
+     <string name="BackAnimationSpring">Verend</string>
+     <string name="BackAnimationPredictive">Voorspellend</string>
+     <string name="AddToFilter">Aan filter toevoegen</string>
+-    <string name="UnifiedPushNeverReceivedNotifications">Sinds de start van Niagram zijn er geen meldingen via UnifiedPush ontvangen.</string>
+-    <string name="UnifiedPushLastReceivedNotification">De laatste melding via UnifiedPush kwam %1$d seconden geleden binnen.\n\nSinds de start van Niagram zijn er %2$d meldingen ontvangen.</string>
++    <string name="UnifiedPushNeverReceivedNotifications">Sinds de start van ni12 zijn er geen meldingen via UnifiedPush ontvangen.</string>
++    <string name="UnifiedPushLastReceivedNotification">De laatste melding via UnifiedPush kwam %1$d seconden geleden binnen.\n\nSinds de start van ni12 zijn er %2$d meldingen ontvangen.</string>
+     <string name="UnifiedPushCurrentEndpoint">Het huidige UnifiedPush-endpoint is: %1$s</string>
+     <string name="PlayOnce">Eén keer afspelen</string>
+     <string name="StorageSettings">Opslag</string>
+@@ -576,7 +576,7 @@
+     <!-- Verified Badge -->
+     <string name="VerifySelf">Mezelf verifiëren</string>
+     <string name="VerifySelfDetail">Toont een verificatiebadge op je huidige account (alleen lokaal)</string>
+-    <string name="NiagramVerifiedOfficial">Niagram Officieel</string>
++    <string name="ni12VerifiedOfficial">ni12 Officieel</string>
+     <string name="NagramVerifiedDev">Nagram-ontwikkelaar</string>
+ 
+     <!-- Input Text Animations -->
+@@ -671,7 +671,7 @@
+     <string name="CallTo">**%1$s** bellen?</string>
+     <string name="DisableNumberRounding">Afronden van getallen uitschakelen</string>
+     <string name="Categories">Categorieën</string>
+-    <string name="OfficialChannel">Niagram-buildkanaal</string>
++    <string name="OfficialChannel">ni12-buildkanaal</string>
+     <string name="About">Over</string>
+     <string name="SourceCode">Broncode</string>
+     <string name="ResetStickerSize">Stickergrootte resetten</string>
+@@ -794,7 +794,7 @@
+     <string name="More">Meer</string>
+     <string name="ShowIdAndDc">ID / DC tonen in profiel</string>
+     <string name="DialogsSettings">Chats</string>
+-    <string name="NiagramXPushService">Pushdienst</string>
++    <string name="ni12XPushService">Pushdienst</string>
+     <string name="DisableSystemAccount">Systeemaccount uitschakelen</string>
+     <string name="DisableProxyWhenVpnEnabled">Proxy uitschakelen als VPN actief is</string>
+     <string name="SkipOpenLinkConfirm">Bevestiging bij openen van links overslaan</string>
+diff --git a/TMessagesProj/src/main/res/values-pl-rPL/strings_nia.xml b/TMessagesProj/src/main/res/values-pl-rPL/strings_nia.xml
+index 21c00289..ee746235 100644
+--- a/TMessagesProj/src/main/res/values-pl-rPL/strings_nia.xml
++++ b/TMessagesProj/src/main/res/values-pl-rPL/strings_nia.xml
+@@ -9,7 +9,7 @@
+     <string name="SendReactions">Wysyłaj reakcje</string>
+     <string name="ShowReactions">Pokaż reakcje</string>
+     <string name="CustomTitle">Tytuł niestandardowy</string>
+-    <string name="CustomTitleHint">Pozostaw puste, aby użyć Niagram</string>
++    <string name="CustomTitleHint">Pozostaw puste, aby użyć ni12</string>
+     <string name="CopyPhoto">Kopiuj zdjęcie</string>
+     <string name="PhotoCopied">Zdjęcie skopiowane do schowka</string>
+     <string name="ToTheBeginning">Do początku</string>
+@@ -127,7 +127,7 @@
+     <string name="ForwardTextCopyNotice">Zostanie wysłana jako kopia od Ciebie, bez etykiety przekazania</string>
+     <string name="ForwardTextEmptyNotice">Tekst wiadomości nie może być pusty</string>
+ 
+-    <string name="XChannel">Kanał Niagram</string>
++    <string name="XChannel">Kanał ni12</string>
+     <string name="EnableSaveDeletedMessages">Zapisz usunięte wiadomości</string>
+     <string name="SpyMode">Tryb szpiega</string>
+     <string name="SaveDeletedMessagesInPrivate">Czaty prywatne</string>
+@@ -469,8 +469,8 @@
+     <string name="BackAnimationSpring">Efekt sprężyny</string>
+     <string name="BackAnimationPredictive">Predykcyjna</string>
+     <string name="AddToFilter">Dodaj do filtra</string>
+-    <string name="UnifiedPushNeverReceivedNotifications">Od uruchomienia Niagram nie otrzymano powiadomień przez UnifiedPush.</string>
+-    <string name="UnifiedPushLastReceivedNotification">Ostatnie powiadomienie przez UnifiedPush przyszło %1$d s temu.\n\nOd uruchomienia Niagram otrzymano powiadomień: %2$d.</string>
++    <string name="UnifiedPushNeverReceivedNotifications">Od uruchomienia ni12 nie otrzymano powiadomień przez UnifiedPush.</string>
++    <string name="UnifiedPushLastReceivedNotification">Ostatnie powiadomienie przez UnifiedPush przyszło %1$d s temu.\n\nOd uruchomienia ni12 otrzymano powiadomień: %2$d.</string>
+     <string name="UnifiedPushCurrentEndpoint">Aktualny punkt końcowy UnifiedPush to: %1$s</string>
+     <string name="PlayOnce">Odtwórz raz</string>
+     <string name="StorageSettings">Pamięć</string>
+@@ -570,7 +570,7 @@
+     <!-- Verified Badge -->
+     <string name="VerifySelf">Zweryfikuj mnie</string>
+     <string name="VerifySelfDetail">Pokazuje odznakę weryfikacji na Twoim bieżącym koncie (tylko lokalnie)</string>
+-    <string name="NiagramVerifiedOfficial">Oficjalny Niagram</string>
++    <string name="ni12VerifiedOfficial">Oficjalny ni12</string>
+     <string name="NagramVerifiedDev">Deweloper Nagram</string>
+ 
+     <!-- Input Text Animations -->
+@@ -653,7 +653,7 @@
+     <string name="CallTo">Zadzwonić do **%1$s**?</string>
+     <string name="DisableNumberRounding">Wyłącz zaokrąglanie liczb</string>
+     <string name="Categories">Kategorie</string>
+-    <string name="OfficialChannel">Kanał kompilacji Niagram</string>
++    <string name="OfficialChannel">Kanał kompilacji ni12</string>
+     <string name="About">O aplikacji</string>
+     <string name="SourceCode">Kod źródłowy</string>
+     <string name="ResetStickerSize">Zresetuj rozmiar naklejki</string>
+@@ -776,7 +776,7 @@
+     <string name="More">Więcej</string>
+     <string name="ShowIdAndDc">Pokaż ID / DC w profilu</string>
+     <string name="DialogsSettings">Czaty</string>
+-    <string name="NiagramXPushService">Usługa push</string>
++    <string name="ni12XPushService">Usługa push</string>
+     <string name="DisableSystemAccount">Wyłącz konto systemowe</string>
+     <string name="DisableProxyWhenVpnEnabled">Wyłącz serwer proxy, gdy VPN jest włączony</string>
+     <string name="DisableProxyWhenVpnEnabledDesc">Automatycznie zawiesza serwer proxy po wykryciu systemowej sieci VPN. Uwaga: przełączenie sieci (np. z Wi-Fi na dane komórkowe) lub ponowne połączenie VPN może chwilowo wznowić działanie proxy.</string>
 diff --git a/TMessagesProj/src/main/res/values-pt-rBR/strings.xml b/TMessagesProj/src/main/res/values-pt-rBR/strings.xml
 index e3576736..476983f8 100644
 --- a/TMessagesProj/src/main/res/values-pt-rBR/strings.xml
@@ -22665,8 +23654,428 @@ index e3576736..476983f8 100644
      <string name="AppNameBeta">Telegram Beta</string>
      <string name="LanguageName">Português (Brasil)</string>
      <string name="English">Inglês</string>
+diff --git a/TMessagesProj/src/main/res/values-pt-rBR/strings_nia.xml b/TMessagesProj/src/main/res/values-pt-rBR/strings_nia.xml
+index a880877f..6431b568 100644
+--- a/TMessagesProj/src/main/res/values-pt-rBR/strings_nia.xml
++++ b/TMessagesProj/src/main/res/values-pt-rBR/strings_nia.xml
+@@ -9,7 +9,7 @@
+     <string name="SendReactions">Enviar reações</string>
+     <string name="ShowReactions">Mostrar reações</string>
+     <string name="CustomTitle">Título personalizado</string>
+-    <string name="CustomTitleHint">Deixe em branco para usar o Niagram</string>
++    <string name="CustomTitleHint">Deixe em branco para usar o ni12</string>
+     <string name="CopyPhoto">Copiar foto</string>
+     <string name="PhotoCopied">Foto copiada para a área de transferência</string>
+     <string name="ToTheBeginning">Ir para o início</string>
+@@ -127,7 +127,7 @@
+     <string name="ForwardTextPlaceholder">Texto da mensagem</string>
+     <string name="ForwardTextCopyNotice">Será enviada como uma cópia sua, sem indicação de encaminhamento</string>
+     <string name="ForwardTextEmptyNotice">O texto da mensagem não pode ficar vazio</string>
+-    <string name="XChannel">Canal Niagram</string>
++    <string name="XChannel">Canal ni12</string>
+     <string name="EnableSaveDeletedMessages">Salvar mensagens apagadas</string>
+     <string name="SpyMode">Modo espião</string>
+     <string name="SaveDeletedMessagesInPrivate">Conversas privadas</string>
+@@ -469,8 +469,8 @@
+     <string name="BackAnimationSpring">Elástica</string>
+     <string name="BackAnimationPredictive">Preditiva</string>
+     <string name="AddToFilter">Adicionar ao filtro</string>
+-    <string name="UnifiedPushNeverReceivedNotifications">Nenhuma notificação foi recebida via UnifiedPush desde que o Niagram foi iniciado.</string>
+-    <string name="UnifiedPushLastReceivedNotification">A última notificação via UnifiedPush chegou há %1$d segundos.\n\n%2$d notificações recebidas desde que o Niagram foi iniciado.</string>
++    <string name="UnifiedPushNeverReceivedNotifications">Nenhuma notificação foi recebida via UnifiedPush desde que o ni12 foi iniciado.</string>
++    <string name="UnifiedPushLastReceivedNotification">A última notificação via UnifiedPush chegou há %1$d segundos.\n\n%2$d notificações recebidas desde que o ni12 foi iniciado.</string>
+     <string name="UnifiedPushCurrentEndpoint">O endpoint atual do UnifiedPush é: %1$s</string>
+     <string name="PlayOnce">Reproduzir uma vez</string>
+     <string name="StorageSettings">Armazenamento</string>
+@@ -569,7 +569,7 @@
+     <!-- Verified Badge -->
+     <string name="VerifySelf">Verificar própria conta</string>
+     <string name="VerifySelfDetail">Exibe localmente o selo de verificação exclusivo para a sua conta atual.</string>
+-    <string name="NiagramVerifiedOfficial">Oficial do NiagramX</string>
++    <string name="ni12VerifiedOfficial">Oficial do ni12X</string>
+     <string name="NagramVerifiedDev">Desenvolvedor do Nagram</string>
+     <string name="DisableProxyWhenVpnEnabledDesc">Suspende automaticamente o proxy quando a VPN do sistema for detectada. Observação: trocar de rede (ex.: de Wi-Fi para dados móveis) ou reconectar a VPN pode reativar o proxy momentaneamente.</string>
+ 
+@@ -663,7 +663,7 @@
+     <string name="CallTo">Ligar para **%1$s**?</string>
+     <string name="DisableNumberRounding">Desativar arredondamento de números</string>
+     <string name="Categories">Categorias</string>
+-    <string name="OfficialChannel">Canal de builds do Niagram</string>
++    <string name="OfficialChannel">Canal de builds do ni12</string>
+     <string name="About">Sobre</string>
+     <string name="SourceCode">Código-fonte</string>
+     <string name="ResetStickerSize">Redefinir tamanho do sticker</string>
+@@ -786,7 +786,7 @@
+     <string name="More">Mais</string>
+     <string name="ShowIdAndDc">Mostrar ID e DC no perfil</string>
+     <string name="DialogsSettings">Chats</string>
+-    <string name="NiagramXPushService">Serviço push</string>
++    <string name="ni12XPushService">Serviço push</string>
+     <string name="DisableSystemAccount">Desativar conta do sistema</string>
+     <string name="DisableProxyWhenVpnEnabled">Desativar proxy quando a VPN estiver ativada</string>
+     <string name="SkipOpenLinkConfirm">Ignorar confirmação ao abrir links</string>
+diff --git a/TMessagesProj/src/main/res/values-ru-rRU/strings_nia.xml b/TMessagesProj/src/main/res/values-ru-rRU/strings_nia.xml
+index 6d8f67a4..fb0308f0 100644
+--- a/TMessagesProj/src/main/res/values-ru-rRU/strings_nia.xml
++++ b/TMessagesProj/src/main/res/values-ru-rRU/strings_nia.xml
+@@ -9,7 +9,7 @@
+     <string name="SendReactions">Отправить реакцию</string>
+     <string name="ShowReactions">Показать реакции</string>
+     <string name="CustomTitle">Пользовательский заголовок</string>
+-    <string name="CustomTitleHint">Оставьте поле пустым, чтобы использовать «Niagram»</string>
++    <string name="CustomTitleHint">Оставьте поле пустым, чтобы использовать «ni12»</string>
+     <string name="CopyPhoto">Копировать фото</string>
+     <string name="PhotoCopied">Фото скопировано в буфер обмена</string>
+     <string name="ToTheBeginning">К началу</string>
+@@ -115,7 +115,7 @@
+     <string name="ForwardTextCopyNotice">Отправится копией — от вашего имени, без пометки «Переслано от»</string>
+     <string name="ForwardTextEmptyNotice">Текст сообщения не может быть пустым</string>
+ 
+-    <string name="XChannel">Канал Niagram</string>
++    <string name="XChannel">Канал ni12</string>
+     <string name="EnableSaveDeletedMessages">Сохранять удалённые сообщения</string>
+     <string name="DeletedMessage">удалено</string>
+     <string name="EnableSaveEditsHistory">Сохранять историю изменений</string>
+@@ -443,8 +443,8 @@
+     <string name="BackAnimationSpring">Пружинная</string>
+     <string name="BackAnimationPredictive">Предиктивная</string>
+     <string name="AddToFilter">Добавить в фильтр</string>
+-    <string name="UnifiedPushNeverReceivedNotifications">С момента запуска Niagram вы не получали уведомлений с помощью UnifiedPush.</string>
+-    <string name="UnifiedPushLastReceivedNotification">Последнее уведомление, полученное с помощью UnifiedPush, было %1$d секунд назад.\n\nС момента запуска Niagram вы получили %2$d уведомлений.</string>
++    <string name="UnifiedPushNeverReceivedNotifications">С момента запуска ni12 вы не получали уведомлений с помощью UnifiedPush.</string>
++    <string name="UnifiedPushLastReceivedNotification">Последнее уведомление, полученное с помощью UnifiedPush, было %1$d секунд назад.\n\nС момента запуска ni12 вы получили %2$d уведомлений.</string>
+     <string name="UnifiedPushCurrentEndpoint">Текущая конечная точка UnifiedPush: %1$s</string>
+     <string name="PlayOnce">Воспроизвести один раз</string>
+     <string name="StorageSettings">Хранилище</string>
+@@ -505,7 +505,7 @@
+     <!-- Verified Badge -->
+     <string name="VerifySelf">Верифицировать себя</string>
+     <string name="VerifySelfDetail">Локально отображать эксклюзивный значок верификации для текущего аккаунта</string>
+-    <string name="NiagramVerifiedOfficial">Представитель Niagram</string>
++    <string name="ni12VerifiedOfficial">Представитель ni12</string>
+     <string name="NagramVerifiedDev">Разработчик Nagram</string>
+ 
+     <!-- Input Text Animations -->
+@@ -587,7 +587,7 @@
+     <string name="CallTo">Позвонить **%1$s**?</string>
+     <string name="DisableNumberRounding">Не округлять числа</string>
+     <string name="Categories">Настройки</string>
+-    <string name="OfficialChannel">Канал сборок Niagram</string>
++    <string name="OfficialChannel">Канал сборок ni12</string>
+     <string name="About">О проекте</string>
+     <string name="SourceCode">Исходный код</string>
+     <string name="ResetStickerSize">Размер стикеров по умолчанию</string>
+@@ -710,7 +710,7 @@
+     <string name="More">Ещё</string>
+     <string name="ShowIdAndDc">Показывать ID и DC в профиле</string>
+     <string name="DialogsSettings">Настройки чатов</string>
+-    <string name="NiagramXPushService">Push-сервис</string>
++    <string name="ni12XPushService">Push-сервис</string>
+     <string name="DisableSystemAccount">Скрыть аккаунт в системе</string>
+     <string name="DisableProxyWhenVpnEnabled">Отключить прокси при включении VPN</string>
+     <string name="DisableProxyWhenVpnEnabledDesc">Автоматически приостанавливать прокси при обнаружении системного VPN. Примечание: переключение сетей (например, с Wi-Fi на мобильный интернет) или переподключение VPN может привести к кратковременному возобновлению работы прокси.</string>
+diff --git a/TMessagesProj/src/main/res/values-tr-rTR/strings_nia.xml b/TMessagesProj/src/main/res/values-tr-rTR/strings_nia.xml
+index 4480164e..c2377d48 100644
+--- a/TMessagesProj/src/main/res/values-tr-rTR/strings_nia.xml
++++ b/TMessagesProj/src/main/res/values-tr-rTR/strings_nia.xml
+@@ -9,7 +9,7 @@
+     <string name="SendReactions">Tepki Gönder</string>
+     <string name="ShowReactions">Tepkileri Göster</string>
+     <string name="CustomTitle">Özel Başlık</string>
+-    <string name="CustomTitleHint">Niagram kullanmak için boş bırakın</string>
++    <string name="CustomTitleHint">ni12 kullanmak için boş bırakın</string>
+     <string name="CopyPhoto">Fotoğrafı Kopyala</string>
+     <string name="PhotoCopied">Fotoğraf panoya kopyalandı</string>
+     <string name="ToTheBeginning">Başa Dön</string>
+@@ -127,7 +127,7 @@
+     <string name="ForwardTextCopyNotice">İletildi etiketi olmadan, sizin tarafınızdan bir kopya olarak gönderilecektir</string>
+     <string name="ForwardTextEmptyNotice">Mesaj metni boş olamaz</string>
+ 
+-    <string name="XChannel">Niagram Kanalı</string>
++    <string name="XChannel">ni12 Kanalı</string>
+     <string name="EnableSaveDeletedMessages">Silinen Mesajları Kaydet</string>
+     <string name="SpyMode">Casus modu</string>
+     <string name="SaveDeletedMessagesInPrivate">Özel sohbetler</string>
+@@ -469,8 +469,8 @@
+     <string name="BackAnimationSpring">Yay</string>
+     <string name="BackAnimationPredictive">Öngörücü</string>
+     <string name="AddToFilter">Filtreye Ekle</string>
+-    <string name="UnifiedPushNeverReceivedNotifications">Niagram başlatıldığından beri UnifiedPush üzerinden hiç bildirim alınmadı.</string>
+-    <string name="UnifiedPushLastReceivedNotification">UnifiedPush ile en son alınan bildirim %1$d saniye önceydi.\n\nNiagram başlatıldığından beri %2$d bildirim aldınız.</string>
++    <string name="UnifiedPushNeverReceivedNotifications">ni12 başlatıldığından beri UnifiedPush üzerinden hiç bildirim alınmadı.</string>
++    <string name="UnifiedPushLastReceivedNotification">UnifiedPush ile en son alınan bildirim %1$d saniye önceydi.\n\nni12 başlatıldığından beri %2$d bildirim aldınız.</string>
+     <string name="UnifiedPushCurrentEndpoint">Mevcut UnifiedPush uç noktası: %1$s</string>
+     <string name="PlayOnce">Bir kez oynat</string>
+     <string name="StorageSettings">Depolama</string>
+@@ -570,7 +570,7 @@
+     <!-- Verified Badge -->
+     <string name="VerifySelf">Kendimi Doğrula</string>
+     <string name="VerifySelfDetail">Mevcut hesabınızda bir onay rozeti gösterir (yalnızca yerel)</string>
+-    <string name="NiagramVerifiedOfficial">Niagram Yetkilisi</string>
++    <string name="ni12VerifiedOfficial">ni12 Yetkilisi</string>
+     <string name="NagramVerifiedDev">Nagram Geliştiricisi</string>
+ 
+     <!-- Input Text Animations -->
+@@ -653,7 +653,7 @@
+     <string name="CallTo">**%1$s** kişisi aransın mı?</string>
+     <string name="DisableNumberRounding">Sayı Yuvarlamayı Devre Dışı Bırak</string>
+     <string name="Categories">Kategoriler</string>
+-    <string name="OfficialChannel">Niagram Derleme Kanalı</string>
++    <string name="OfficialChannel">ni12 Derleme Kanalı</string>
+     <string name="About">Hakkında</string>
+     <string name="SourceCode">Kaynak Kod</string>
+     <string name="ResetStickerSize">Çıkartma boyutunu sıfırla</string>
+@@ -776,7 +776,7 @@
+     <string name="More">Daha Fazla</string>
+     <string name="ShowIdAndDc">Profilde ID / DC Göster</string>
+     <string name="DialogsSettings">Sohbetler</string>
+-    <string name="NiagramXPushService">Bildirim (Push) Servisi</string>
++    <string name="ni12XPushService">Bildirim (Push) Servisi</string>
+     <string name="DisableSystemAccount">Sistem Hesabını Devre Dışı Bırak</string>
+     <string name="DisableProxyWhenVpnEnabled">VPN Etkinken Proxy\'yi Devre Dışı Bırak</string>
+     <string name="DisableProxyWhenVpnEnabledDesc">Sistem VPN\'i algılandığında proxy\'yi otomatik olarak askıya alır. Not: Ağ değiştirme (örn. Wi-Fi\'dan hücresel veriye) veya VPN\'in yeniden bağlanması proxy\'nin geçici olarak devam etmesine neden olabilir.</string>
+diff --git a/TMessagesProj/src/main/res/values-uk-rUA/strings_nia.xml b/TMessagesProj/src/main/res/values-uk-rUA/strings_nia.xml
+index 28894179..87ef1af5 100644
+--- a/TMessagesProj/src/main/res/values-uk-rUA/strings_nia.xml
++++ b/TMessagesProj/src/main/res/values-uk-rUA/strings_nia.xml
+@@ -9,7 +9,7 @@
+     <string name="SendReactions">Надсилати реакції</string>
+     <string name="ShowReactions">Показати реакції</string>
+     <string name="CustomTitle">Свій заголовок</string>
+-    <string name="CustomTitleHint">Залиште порожнім, щоб використовувати Niagram</string>
++    <string name="CustomTitleHint">Залиште порожнім, щоб використовувати ni12</string>
+     <string name="CopyPhoto">Копіювати фото</string>
+     <string name="PhotoCopied">Фото скопійовано до буфера обміну</string>
+     <string name="ToTheBeginning">На початок</string>
+@@ -106,7 +106,7 @@
+     <string name="ForwardTextCopyNotice">Буде надіслано як копію від вас, без мітки пересилання</string>
+     <string name="ForwardTextEmptyNotice">Текст повідомлення не може бути порожнім</string>
+ 
+-    <string name="XChannel">Канал Niagram</string>
++    <string name="XChannel">Канал ni12</string>
+     <string name="EnableSaveDeletedMessages">Зберігати видалені повідомлення</string>
+     <string name="DeletedMessage">видалено</string>
+     <string name="EnableSaveEditsHistory">Зберегти історію змін</string>
+@@ -431,8 +431,8 @@
+     <string name="BackAnimationSpring">Пружна</string>
+     <string name="BackAnimationPredictive">Прогнозована</string>
+     <string name="AddToFilter">Додати до фільтра</string>
+-    <string name="UnifiedPushNeverReceivedNotifications">З моменту запуску Niagram сповіщень через UnifiedPush не надходило.</string>
+-    <string name="UnifiedPushLastReceivedNotification">Останнє сповіщення через UnifiedPush надійшло %1$d сек. тому.\n\nВи отримали %2$d сповіщень з моменту запуску Niagram.</string>
++    <string name="UnifiedPushNeverReceivedNotifications">З моменту запуску ni12 сповіщень через UnifiedPush не надходило.</string>
++    <string name="UnifiedPushLastReceivedNotification">Останнє сповіщення через UnifiedPush надійшло %1$d сек. тому.\n\nВи отримали %2$d сповіщень з моменту запуску ni12.</string>
+     <string name="UnifiedPushCurrentEndpoint">Поточна кінцева точка UnifiedPush: %1$s</string>
+     <string name="PlayOnce">Відтворити один раз</string>
+     <string name="StorageSettings">Сховище</string>
+@@ -493,7 +493,7 @@
+     <!-- Verified Badge -->
+     <string name="VerifySelf">Верифікувати себе</string>
+     <string name="VerifySelfDetail">Локально відображати ексклюзивний значок верифікації для поточного акаунта</string>
+-    <string name="NiagramVerifiedOfficial">Представник Niagram</string>
++    <string name="ni12VerifiedOfficial">Представник ni12</string>
+     <string name="NagramVerifiedDev">Розробник Nagram</string>
+ 
+     <!-- Input Text Animations -->
+@@ -575,7 +575,7 @@
+     <string name="CallTo">Зателефонувати до **%1$s**?</string>
+     <string name="DisableNumberRounding">Не округлювати числа</string>
+     <string name="Categories">Категорії</string>
+-    <string name="OfficialChannel">Канал збірок Niagram</string>
++    <string name="OfficialChannel">Канал збірок ni12</string>
+     <string name="About">Про додаток</string>
+     <string name="SourceCode">Вихідний код</string>
+     <string name="ResetStickerSize">Скинути розмір наліпки</string>
+@@ -696,7 +696,7 @@
+     <string name="More">Більше</string>
+     <string name="ShowIdAndDc">Показати ID/DC в профілі</string>
+     <string name="DialogsSettings">Чати</string>
+-    <string name="NiagramXPushService">Служба Push-сповіщень</string>
++    <string name="ni12XPushService">Служба Push-сповіщень</string>
+     <string name="DisableSystemAccount">Приховати акаунт у системі</string>
+     <string name="DisableProxyWhenVpnEnabled">Вимкнути проксі, коли увімкнено VPN</string>
+     <string name="SkipOpenLinkConfirm">Пропустити підтвердження відкриття посилання</string>
+diff --git a/TMessagesProj/src/main/res/values-vi-rVN/strings_nia.xml b/TMessagesProj/src/main/res/values-vi-rVN/strings_nia.xml
+index d5958173..25685438 100644
+--- a/TMessagesProj/src/main/res/values-vi-rVN/strings_nia.xml
++++ b/TMessagesProj/src/main/res/values-vi-rVN/strings_nia.xml
+@@ -9,7 +9,7 @@
+     <string name="SendReactions">Gửi Phản ứng</string>
+     <string name="ShowReactions">Hiện phản ứng</string>
+     <string name="CustomTitle">Tiêu đề tùy chỉnh</string>
+-    <string name="CustomTitleHint">Để trống để sử dụng Niagram</string>
++    <string name="CustomTitleHint">Để trống để sử dụng ni12</string>
+     <string name="CopyPhoto">Sao chép Ảnh</string>
+     <string name="PhotoCopied">Ảnh đã được sao chép vào bộ nhớ tạm</string>
+     <string name="ToTheBeginning">Về đầu</string>
+@@ -127,7 +127,7 @@
+     <string name="ForwardTextCopyNotice">Sẽ được gửi dưới dạng bản sao từ bạn, không có nhãn chuyển tiếp</string>
+     <string name="ForwardTextEmptyNotice">Văn bản tin nhắn không được để trống</string>
+ 
+-    <string name="XChannel">Kênh Niagram</string>
++    <string name="XChannel">Kênh ni12</string>
+     <string name="EnableSaveDeletedMessages">Lưu tin nhắn đã xóa</string>
+     <string name="SpyMode">Chế độ gián điệp</string>
+     <string name="SaveDeletedMessagesInPrivate">Trò chuyện riêng</string>
+@@ -469,8 +469,8 @@
+     <string name="BackAnimationSpring">Đàn hồi</string>
+     <string name="BackAnimationPredictive">Dự đoán</string>
+     <string name="AddToFilter">Thêm vào bộ lọc</string>
+-    <string name="UnifiedPushNeverReceivedNotifications">Chưa nhận được thông báo nào qua UnifiedPush kể từ khi Niagram khởi động.</string>
+-    <string name="UnifiedPushLastReceivedNotification">Thông báo gần nhất nhận được qua UnifiedPush là từ %1$d giây trước.\n\nBạn đã nhận được %2$d thông báo kể từ khi Niagram khởi động.</string>
++    <string name="UnifiedPushNeverReceivedNotifications">Chưa nhận được thông báo nào qua UnifiedPush kể từ khi ni12 khởi động.</string>
++    <string name="UnifiedPushLastReceivedNotification">Thông báo gần nhất nhận được qua UnifiedPush là từ %1$d giây trước.\n\nBạn đã nhận được %2$d thông báo kể từ khi ni12 khởi động.</string>
+     <string name="UnifiedPushCurrentEndpoint">Điểm cuối UnifiedPush hiện tại là: %1$s</string>
+     <string name="PlayOnce">Phát một lần</string>
+     <string name="StorageSettings">Bộ nhớ</string>
+@@ -571,7 +571,7 @@
+     <!-- Verified Badge -->
+     <string name="VerifySelf">Tự xác minh</string>
+     <string name="VerifySelfDetail">Hiển thị huy hiệu xác minh trên tài khoản hiện tại của bạn (chỉ cục bộ)</string>
+-    <string name="NiagramVerifiedOfficial">Niagram chính thức</string>
++    <string name="ni12VerifiedOfficial">ni12 chính thức</string>
+     <string name="NagramVerifiedDev">Nhà phát triển Nagram</string>
+ 
+     <!-- Input Text Animations -->
+@@ -654,7 +654,7 @@
+     <string name="CallTo">Gọi cho **%1$s**?</string>
+     <string name="DisableNumberRounding">Vô hiệu hoá làm tròn số</string>
+     <string name="Categories">Danh mục</string>
+-    <string name="OfficialChannel">Kênh bản dựng Niagram</string>
++    <string name="OfficialChannel">Kênh bản dựng ni12</string>
+     <string name="About">Thông tin</string>
+     <string name="SourceCode">Mã nguồn</string>
+     <string name="ResetStickerSize">Đặt lại kích thước nhãn dán</string>
+@@ -777,7 +777,7 @@
+     <string name="More">Thêm</string>
+     <string name="ShowIdAndDc">Hiển thị ID / DC trong hồ sơ</string>
+     <string name="DialogsSettings">Trò chuyện</string>
+-    <string name="NiagramXPushService">Dịch vụ Push</string>
++    <string name="ni12XPushService">Dịch vụ Push</string>
+     <string name="DisableSystemAccount">Vô hiệu hóa tài khoản hệ thống</string>
+     <string name="DisableProxyWhenVpnEnabled">Tắt proxy khi bật VPN</string>
+     <string name="DisableProxyWhenVpnEnabledDesc">Tự động tạm dừng proxy khi phát hiện VPN hệ thống. Lưu ý: Chuyển đổi mạng (ví dụ: từ Wi-Fi sang dữ liệu di động) hoặc VPN kết nối lại có thể khiến proxy tạm thời tiếp tục hoạt động.</string>
+diff --git a/TMessagesProj/src/main/res/values-zh-rCN/strings_nia.xml b/TMessagesProj/src/main/res/values-zh-rCN/strings_nia.xml
+index b12a7752..e43b52d9 100644
+--- a/TMessagesProj/src/main/res/values-zh-rCN/strings_nia.xml
++++ b/TMessagesProj/src/main/res/values-zh-rCN/strings_nia.xml
+@@ -9,7 +9,7 @@
+     <string name="SendReactions">发送表情回应</string>
+     <string name="ShowReactions">显示表情回应</string>
+     <string name="CustomTitle">自定义标题</string>
+-    <string name="CustomTitleHint">留空则使用 Niagram</string>
++    <string name="CustomTitleHint">留空则使用 ni12</string>
+     <string name="CopyPhoto">复制图片</string>
+     <string name="PhotoCopied">图片已复制到剪贴板</string>
+     <string name="ToTheBeginning">回到顶部</string>
+@@ -133,7 +133,7 @@
+     <string name="ForwardTextPlaceholder">消息文本</string>
+     <string name="ForwardTextCopyNotice">将以您的名义作为副本发送，不显示转发来源</string>
+     <string name="ForwardTextEmptyNotice">消息文本不能为空</string>
+-    <string name="XChannel">Niagram 频道</string>
++    <string name="XChannel">ni12 频道</string>
+     <string name="EnableSaveDeletedMessages">保存已删除消息</string>
+     <string name="SpyMode">幽匿模式</string>
+     <string name="SaveDeletedMessagesInPrivate">私聊</string>
+@@ -475,8 +475,8 @@
+     <string name="BackAnimationSpring">弹性</string>
+     <string name="BackAnimationPredictive">预测</string>
+     <string name="AddToFilter">添加过滤器</string>
+-    <string name="UnifiedPushNeverReceivedNotifications">自 Niagram 启动以来，尚未通过 UnifiedPush 收到任何通知。</string>
+-    <string name="UnifiedPushLastReceivedNotification">最近一次通过 UnifiedPush 收到通知是在 %1$d 秒前。\n\n自 Niagram 启动以来已收到 %2$d 条通知。</string>
++    <string name="UnifiedPushNeverReceivedNotifications">自 ni12 启动以来，尚未通过 UnifiedPush 收到任何通知。</string>
++    <string name="UnifiedPushLastReceivedNotification">最近一次通过 UnifiedPush 收到通知是在 %1$d 秒前。\n\n自 ni12 启动以来已收到 %2$d 条通知。</string>
+     <string name="UnifiedPushCurrentEndpoint">当前的 UnifiedPush 端点是：%1$s</string>
+     <string name="PlayOnce">播放一次</string>
+     <string name="StorageSettings">存储</string>
+@@ -577,7 +577,7 @@
+     <string name="DisableProxyWhenVpnEnabledDesc">检测到系统 VPN 时自动暂停代理。注意：切换网络（如 Wi-Fi 切换到移动网络）或 VPN 重连时，代理可能会短暂恢复。</string>
+     <string name="VerifySelf">给自己点亮认证徽章</string>
+     <string name="VerifySelfDetail">在本地为当前账号显示专属认证徽章</string>
+-    <string name="NiagramVerifiedOfficial">Niagram 开发者</string>
++    <string name="ni12VerifiedOfficial">ni12 开发者</string>
+     <string name="NagramVerifiedDev">Nagram 开发者</string>
+ 
+     <!-- Input Text Animations -->
+@@ -672,7 +672,7 @@
+     <string name="CallTo">要呼叫 **%1$s** 吗？</string>
+     <string name="DisableNumberRounding">禁用数字取整</string>
+     <string name="Categories">类别</string>
+-    <string name="OfficialChannel">Niagram 构建频道</string>
++    <string name="OfficialChannel">ni12 构建频道</string>
+     <string name="About">关于</string>
+     <string name="SourceCode">源代码</string>
+     <string name="ResetStickerSize">重置贴纸大小</string>
+@@ -795,7 +795,7 @@
+     <string name="More">更多</string>
+     <string name="ShowIdAndDc">在个人资料中显示 ID / DC</string>
+     <string name="DialogsSettings">聊天列表</string>
+-    <string name="NiagramXPushService">推送服务</string>
++    <string name="ni12XPushService">推送服务</string>
+     <string name="DisableSystemAccount">禁用系统账户</string>
+     <string name="DisableProxyWhenVpnEnabled">启用 VPN 时禁用代理</string>
+     <string name="SkipOpenLinkConfirm">跳过打开链接确认</string>
+diff --git a/TMessagesProj/src/main/res/values-zh-rTW/strings_nia.xml b/TMessagesProj/src/main/res/values-zh-rTW/strings_nia.xml
+index f98c1ae0..6b3b2960 100644
+--- a/TMessagesProj/src/main/res/values-zh-rTW/strings_nia.xml
++++ b/TMessagesProj/src/main/res/values-zh-rTW/strings_nia.xml
+@@ -9,7 +9,7 @@
+     <string name="SendReactions">傳送表情回應</string>
+     <string name="ShowReactions">顯示表情回應</string>
+     <string name="CustomTitle">自訂標題</string>
+-    <string name="CustomTitleHint">留空則使用 Niagram</string>
++    <string name="CustomTitleHint">留空則使用 ni12</string>
+     <string name="CopyPhoto">複製圖片</string>
+     <string name="PhotoCopied">圖片已複製到剪貼簿</string>
+     <string name="ToTheBeginning">回到頂部</string>
+@@ -132,7 +132,7 @@
+     <string name="ForwardTextPlaceholder">訊息文字</string>
+     <string name="ForwardTextCopyNotice">將以您的名義作為副本傳送，不會顯示轉傳來源</string>
+     <string name="ForwardTextEmptyNotice">訊息文字不可為空</string>
+-    <string name="XChannel">Niagram 頻道</string>
++    <string name="XChannel">ni12 頻道</string>
+     <string name="EnableSaveDeletedMessages">儲存已刪除訊息</string>
+     <string name="SpyMode">幽匿模式</string>
+     <string name="SaveDeletedMessagesInPrivate">私人聊天</string>
+@@ -474,8 +474,8 @@
+     <string name="BackAnimationSpring">彈性</string>
+     <string name="BackAnimationPredictive">預測</string>
+     <string name="AddToFilter">新增過濾器</string>
+-    <string name="UnifiedPushNeverReceivedNotifications">自 Niagram 啟動以來，尚未透過 UnifiedPush 收到任何通知。</string>
+-    <string name="UnifiedPushLastReceivedNotification">最近一次透過 UnifiedPush 收到通知是在 %1$d 秒前。\n\n自 Niagram 啟動以來已收到 %2$d 則通知。</string>
++    <string name="UnifiedPushNeverReceivedNotifications">自 ni12 啟動以來，尚未透過 UnifiedPush 收到任何通知。</string>
++    <string name="UnifiedPushLastReceivedNotification">最近一次透過 UnifiedPush 收到通知是在 %1$d 秒前。\n\n自 ni12 啟動以來已收到 %2$d 則通知。</string>
+     <string name="UnifiedPushCurrentEndpoint">目前的 UnifiedPush 端點是：%1$s</string>
+     <string name="PlayOnce">播放一次</string>
+     <string name="StorageSettings">儲存</string>
+@@ -577,7 +577,7 @@
+     <string name="DisableProxyWhenVpnEnabledDesc">偵測到系統 VPN 時自動暫停代理。注意：切換網路（如 Wi-Fi 切換至行動網路）或 VPN 重新連線時，代理可能會短暫恢復。</string>
+     <string name="VerifySelf">為自己點亮認證徽章</string>
+     <string name="VerifySelfDetail">在本機為目前帳號顯示專屬認證徽章</string>
+-    <string name="NiagramVerifiedOfficial">Niagram 核心開發者</string>
++    <string name="ni12VerifiedOfficial">ni12 核心開發者</string>
+     <string name="NagramVerifiedDev">Nagram 開發者</string>
+ 
+     <!-- Input Text Animations -->
+@@ -672,7 +672,7 @@
+     <string name="CallTo">撥打給 **%1$s**？</string>
+     <string name="DisableNumberRounding">停用數字四捨五入</string>
+     <string name="Categories">分類</string>
+-    <string name="OfficialChannel">Niagram 建置頻道</string>
++    <string name="OfficialChannel">ni12 建置頻道</string>
+     <string name="About">關於</string>
+     <string name="SourceCode">原始碼</string>
+     <string name="ResetStickerSize">重設貼圖大小</string>
+@@ -794,7 +794,7 @@
+     <string name="More">更多</string>
+     <string name="ShowIdAndDc">在個人資料中顯示 ID/DC</string>
+     <string name="DialogsSettings">聊天列表</string>
+-    <string name="NiagramXPushService">推播服務</string>
++    <string name="ni12XPushService">推播服務</string>
+     <string name="DisableSystemAccount">停用系統帳號</string>
+     <string name="DisableProxyWhenVpnEnabled">啟用 VPN 時停用代理</string>
+     <string name="SkipOpenLinkConfirm">跳過開啟連結確認</string>
 diff --git a/TMessagesProj/src/main/res/values/strings.xml b/TMessagesProj/src/main/res/values/strings.xml
-index 668f1fbf..2449306f 100644
+index 668f1fbf..95b2b5e2 100644
 --- a/TMessagesProj/src/main/res/values/strings.xml
 +++ b/TMessagesProj/src/main/res/values/strings.xml
 @@ -1,6 +1,6 @@
@@ -22677,7 +24086,7 @@ index 668f1fbf..2449306f 100644
      <string name="AppNameBeta">Telegram Beta</string>
      <string name="LanguageName">English</string>
      <string name="English">English</string>
-@@ -11551,4 +11551,12 @@
+@@ -11551,4 +11551,16 @@
      <string name="CreateManagedBotUsernameBotLimit">This bot already has a Premium username. Remove it before adding another.</string>
      <string name="CreateManagedBotUsernameSuffixMissing">The username must end in %1$s.</string>
      <string name="CreateManagedBotUsernameCheckFailed">Couldn\'t check this username. Please try again.</string>
@@ -22689,7 +24098,42 @@ index 668f1fbf..2449306f 100644
 +    <string name="Ni12CreditsTitle">Credits and license</string>
 +    <string name="Ni12SourceTitle">ni12gram source code</string>
 +    <string name="Ni12Credits">ni12gram is an unofficial, modified build of Niagram (https://github.com/HSSkyBoy/Niagram), which is itself based on Nagram, Nekogram and Telegram for Android.\n\nThe copyright of the original code remains with the authors of Telegram for Android, Nekogram, Nagram, NagramX and Niagram.\n\nThis program is free software licensed under the GNU General Public License v3.0 and comes with ABSOLUTELY NO WARRANTY. You may redistribute it under the terms of the GPLv3. The source code of this modified version is available at https://github.com/malo39911-art/ni12gram-patch\n\nni12gram is not affiliated with, endorsed by or certified by Telegram.</string>
++    <string name="Ni12VoiceChanger">Voice changer</string>
++    <string name="Ni12VoiceOff">Off</string>
++    <string name="Ni12VoiceRobot">Robot (metallic)</string>
++    <string name="Ni12VoiceAnon">Anonymous</string>
  </resources>
+diff --git a/TMessagesProj/src/main/res/values/strings_nia.xml b/TMessagesProj/src/main/res/values/strings_nia.xml
+index c212fcb7..3e66b1ce 100644
+--- a/TMessagesProj/src/main/res/values/strings_nia.xml
++++ b/TMessagesProj/src/main/res/values/strings_nia.xml
+@@ -9,7 +9,7 @@
+     <string name="SendReactions">Send Reactions</string>
+     <string name="ShowReactions">Show Reactions</string>
+     <string name="CustomTitle">Custom Title</string>
+-    <string name="CustomTitleHint">Leave blank to use Niagram</string>
++    <string name="CustomTitleHint">Leave blank to use ni12</string>
+     <string name="CopyPhoto">Copy Photo</string>
+     <string name="PhotoCopied">Photo copied to clipboard</string>
+     <string name="ToTheBeginning">To Beginning</string>
+@@ -133,7 +133,7 @@
+     <string name="ForwardTextPlaceholder">Message text</string>
+     <string name="ForwardTextCopyNotice">Will be sent as a copy from you, without a forward label</string>
+     <string name="ForwardTextEmptyNotice">Message text can\'t be empty</string>
+-    <string name="NiagramX" translatable="false">Niagram</string>
++    <string name="NiagramX" translatable="false">ni12</string>
+     <string name="XChannel">Niagram Channel</string>
+     <string name="EnableSaveDeletedMessages">Save Deleted Messages</string>
+     <string name="SpyMode">Spy Mode</string>
+@@ -596,7 +596,7 @@
+     <!-- Verified Badge -->
+     <string name="VerifySelf">Verify Myself</string>
+     <string name="VerifySelfDetail">Show a verified badge on your current account (local only)</string>
+-    <string name="NiagramVerifiedOfficial">Niagram Official</string>
++    <string name="NiagramVerifiedOfficial">ni12 Official</string>
+     <string name="NagramVerifiedDev">Nagram Developer</string>
+ 
+     <!-- Input Text Animations -->
 diff --git a/TMessagesProj/src/main/res/xml/auth.xml b/TMessagesProj/src/main/res/xml/auth.xml
 index b0a075a5..94f2b1ea 100644
 --- a/TMessagesProj/src/main/res/xml/auth.xml
