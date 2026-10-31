@@ -1,0 +1,154 @@
+name: Build ni12gram
+
+# Builds ni12gram = upstream Niagram (pinned commit) + ni12gram.patch
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths-ignore:
+      - '**.md'
+
+permissions:
+  contents: read
+
+env:
+  UPSTREAM_REPO: HSSkyBoy/Niagram
+  UPSTREAM_COMMIT: bc99e5e9907a2ea47d9e6ed432469b8ff553644f
+
+jobs:
+  build:
+    name: Build APK (arm64-v8a)
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    env:
+      NATIVE_TARGET: arm64-v8a
+      CCACHE_COMPILERCHECK: "%compiler% -dumpmachine; %compiler% -dumpversion"
+      CCACHE_HARDLINK: "true"
+      CCACHE_NOHASHDIR: "true"
+      CCACHE_MAXSIZE: "10G"
+      CCACHE_SLOPPINESS: "include_file_ctime,include_file_mtime,time_macros"
+      CCACHE_BASEDIR: "${{ github.workspace }}/src"
+      TELEGRAM_APP_ID: ${{ secrets.TELEGRAM_APP_ID }}
+      TELEGRAM_APP_HASH: ${{ secrets.TELEGRAM_APP_HASH }}
+    steps:
+      - name: Check Telegram API keys
+        run: |
+          if [ -z "$TELEGRAM_APP_ID" ] || [ -z "$TELEGRAM_APP_HASH" ]; then
+            echo "::error::Missing secrets TELEGRAM_APP_ID / TELEGRAM_APP_HASH. Get your own at https://my.telegram.org (API development tools) and add them in Settings > Secrets and variables > Actions."
+            exit 1
+          fi
+
+      - name: Checkout patch repo
+        uses: actions/checkout@v7
+        with:
+          path: patch
+
+      - name: Checkout upstream Niagram (pinned)
+        uses: actions/checkout@v7
+        with:
+          repository: ${{ env.UPSTREAM_REPO }}
+          ref: ${{ env.UPSTREAM_COMMIT }}
+          path: src
+          fetch-depth: 1
+          submodules: recursive
+
+      - name: Apply ni12gram patch
+        working-directory: src
+        run: git apply --binary --whitespace=nowarn ../patch/ni12gram.patch
+
+      - name: Apply native patches
+        working-directory: src/TMessagesProj/jni
+        run: ./patches/tgcalls.sh
+
+      - name: Set up JDK
+        uses: actions/setup-java@v6
+        with:
+          distribution: 'microsoft'
+          java-version: '21'
+
+      - name: Set up Ccache
+        uses: hendrikmuhs/ccache-action@v1.2.23
+        with:
+          key: ni12gram-arm64-v8a
+          restore-keys: |
+            ni12gram-
+          append-timestamp: false
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v6
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v4.0.1
+        with:
+          cmdline-tools-version: 14742923
+          packages: ''
+
+      - name: Accept licenses
+        run: yes | sdkmanager --licenses
+
+      - name: Install SDK 37 and NDK
+        run: |
+          sdkmanager "platform-tools"
+          sdkmanager "platforms;android-37.0"
+          sdkmanager "build-tools;37.0.0"
+          sdkmanager "ndk;27.2.12479018"
+
+      - name: Install native build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends --yes nasm
+
+      - name: Configure Android SDK path
+        working-directory: src
+        run: echo "sdk.dir=${ANDROID_HOME}" >> local.properties
+
+      - name: Modify Gradle JVM args
+        working-directory: src
+        run: |
+          MEMORY_KB=$(awk '/MemTotal/ {print $2}' /proc/meminfo)
+          MEMORY_GB=$((MEMORY_KB / 1024 / 1024))
+          echo "Detected memory size: ${MEMORY_GB}GB"
+          sed -i '/^org\.gradle\.jvmargs=/d' gradle.properties
+          echo "" >> gradle.properties
+          if [ $MEMORY_GB -ge 12 ]; then
+            echo "org.gradle.jvmargs=-Xmx8G -XX:MaxMetaspaceSize=2G -XX:+UseParallelGC -Dfile.encoding=UTF-8" >> gradle.properties
+          else
+            echo "org.gradle.jvmargs=-Xmx5G -XX:MaxMetaspaceSize=1536M -XX:+UseParallelGC -Dfile.encoding=UTF-8" >> gradle.properties
+          fi
+
+      - name: Prepare signing key
+        env:
+          KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
+        run: |
+          mkdir -p keystore-out
+          if [ -n "$KEYSTORE_BASE64" ]; then
+            echo "$KEYSTORE_BASE64" | base64 -d > src/TMessagesProj/release.keystore
+            echo "Using keystore from secret KEYSTORE_BASE64"
+          else
+            keytool -genkeypair -v -keystore src/TMessagesProj/release.keystore \
+              -storepass ni12gram-ci -keypass ni12gram-ci -alias ni12 \
+              -keyalg RSA -keysize 2048 -validity 36500 -dname "CN=ni12gram"
+            cp src/TMessagesProj/release.keystore keystore-out/ni12gram.keystore
+            echo "Generated a NEW keystore (saved as artifact ni12gram-keystore)"
+          fi
+
+      - name: Build release APK
+        working-directory: src
+        env:
+          KEYSTORE_PASS: ${{ secrets.KEYSTORE_PASS || 'ni12gram-ci' }}
+          ALIAS_NAME: ${{ secrets.ALIAS_NAME || 'ni12' }}
+          ALIAS_PASS: ${{ secrets.ALIAS_PASS || 'ni12gram-ci' }}
+        run: ./gradlew TMessagesProj:assembleRelease --build-cache --parallel
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v7
+        with:
+          name: ni12gram-APK
+          path: src/TMessagesProj/build/outputs/apk/release/*.apk
+
+      - name: Upload generated keystore (keep it to update the app later)
+        if: hashFiles('keystore-out/ni12gram.keystore') != ''
+        uses: actions/upload-artifact@v7
+        with:
+          name: ni12gram-keystore
+          path: keystore-out/ni12gram.keystore
