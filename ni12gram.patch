@@ -666,6 +666,119 @@ index 537a5c98..cc13a337 100644
                      double sum = 0;
                      try {
                          long newSamplesCount = samplesCount + len / 2;
+diff --git a/TMessagesProj/src/main/java/org/telegram/messenger/MessageObject.java b/TMessagesProj/src/main/java/org/telegram/messenger/MessageObject.java
+index 7f841ae5..8126ddea 100644
+--- a/TMessagesProj/src/main/java/org/telegram/messenger/MessageObject.java
++++ b/TMessagesProj/src/main/java/org/telegram/messenger/MessageObject.java
+@@ -1935,6 +1935,7 @@ public class MessageObject {
+         this.isSaved = isSavedMessages || getDialogId(message) == UserConfig.getInstance(accountNum).getClientUserId();
+         this.searchType = searchType;
+ 
++        Ni12LocalEmoji.apply(message);
+         currentAccount = accountNum;
+         messageOwner = message;
+         replyMessageObject = replyToMessage;
+diff --git a/TMessagesProj/src/main/java/org/telegram/messenger/Ni12LocalEmoji.java b/TMessagesProj/src/main/java/org/telegram/messenger/Ni12LocalEmoji.java
+new file mode 100644
+index 00000000..e05c99ae
+--- /dev/null
++++ b/TMessagesProj/src/main/java/org/telegram/messenger/Ni12LocalEmoji.java
+@@ -0,0 +1,95 @@
++package org.telegram.messenger;
++
++import android.content.Context;
++import android.content.SharedPreferences;
++
++import org.telegram.tgnet.TLRPC;
++
++import java.util.ArrayList;
++import java.util.concurrent.ConcurrentHashMap;
++
++/**
++ * Premium (custom) emoji for non-premium accounts, visible only on this device.
++ * Telegram's server drops custom-emoji entities for non-premium senders, so we remember them locally
++ * and re-attach them to our own outgoing messages. Other people see the normal fallback emoji.
++ */
++public final class Ni12LocalEmoji {
++
++    private static final ConcurrentHashMap<String, String> pending = new ConcurrentHashMap<>();
++
++    private static SharedPreferences prefs() {
++        return ApplicationLoader.applicationContext.getSharedPreferences("ni12emoji", Context.MODE_PRIVATE);
++    }
++
++    public static String serialize(ArrayList<TLRPC.MessageEntity> ents) {
++        if (ents == null) return "";
++        StringBuilder sb = new StringBuilder();
++        for (int i = 0; i < ents.size(); i++) {
++            TLRPC.MessageEntity e = ents.get(i);
++            if (e instanceof TLRPC.TL_messageEntityCustomEmoji) {
++                sb.append(e.offset).append(',').append(e.length).append(',').append(((TLRPC.TL_messageEntityCustomEmoji) e).document_id).append(';');
++            }
++        }
++        return sb.toString();
++    }
++
++    public static boolean hasCustom(ArrayList<TLRPC.MessageEntity> ents) {
++        if (ents == null) return false;
++        for (int i = 0; i < ents.size(); i++) {
++            if (ents.get(i) instanceof TLRPC.TL_messageEntityCustomEmoji) return true;
++        }
++        return false;
++    }
++
++    private static void inject(ArrayList<TLRPC.MessageEntity> target, String data) {
++        for (String part : data.split(";")) {
++            if (part.isEmpty()) continue;
++            String[] p = part.split(",");
++            if (p.length != 3) continue;
++            try {
++                TLRPC.TL_messageEntityCustomEmoji e = new TLRPC.TL_messageEntityCustomEmoji();
++                e.offset = Integer.parseInt(p[0]);
++                e.length = Integer.parseInt(p[1]);
++                e.document_id = Long.parseLong(p[2]);
++                target.add(e);
++            } catch (Throwable ignore) {
++            }
++        }
++    }
++
++    /** Called when the server acknowledges a message we sent (before the server entities replace the local ones). */
++    public static void capture(long dialogId, int oldId, ArrayList<TLRPC.MessageEntity> localEntities) {
++        if (!hasCustom(localEntities)) return;
++        pending.put(dialogId + ":" + oldId, serialize(localEntities));
++    }
++
++    /** Re-attach the remembered emoji to the acknowledged message and persist them under the real id. */
++    public static void restore(int oldId, TLRPC.Message msg) {
++        if (msg == null) return;
++        String data = pending.remove(msg.dialog_id + ":" + oldId);
++        if (data == null) return;
++        if (msg.entities == null) msg.entities = new ArrayList<>();
++        if (!hasCustom(msg.entities)) {
++            inject(msg.entities, data);
++            if (!msg.entities.isEmpty()) msg.flags |= TLRPC.MESSAGE_FLAG_HAS_ENTITIES;
++        }
++        try {
++            prefs().edit().putString(msg.dialog_id + ":" + msg.id, data).apply();
++        } catch (Throwable ignore) {
++        }
++    }
++
++    /** Called when a MessageObject is built, so reloads from the database still show our emoji. */
++    public static void apply(TLRPC.Message msg) {
++        if (msg == null || !msg.out || msg.id <= 0) return;
++        try {
++            if (msg.entities != null && hasCustom(msg.entities)) return;
++            String data = prefs().getString(MessageObject.getDialogId(msg) + ":" + msg.id, null);
++            if (data == null) return;
++            if (msg.entities == null) msg.entities = new ArrayList<>();
++            inject(msg.entities, data);
++            if (!msg.entities.isEmpty()) msg.flags |= TLRPC.MESSAGE_FLAG_HAS_ENTITIES;
++        } catch (Throwable ignore) {
++        }
++    }
++}
 diff --git a/TMessagesProj/src/main/java/org/telegram/messenger/Ni12VoiceEffect.java b/TMessagesProj/src/main/java/org/telegram/messenger/Ni12VoiceEffect.java
 new file mode 100644
 index 00000000..c38ed31e
@@ -806,6 +919,38 @@ index 00000000..c38ed31e
 +        return v > 1f ? 1f : (v < -1f ? -1f : v);
 +    }
 +}
+diff --git a/TMessagesProj/src/main/java/org/telegram/messenger/SendMessagesHelper.java b/TMessagesProj/src/main/java/org/telegram/messenger/SendMessagesHelper.java
+index a864a133..ee388ce3 100644
+--- a/TMessagesProj/src/main/java/org/telegram/messenger/SendMessagesHelper.java
++++ b/TMessagesProj/src/main/java/org/telegram/messenger/SendMessagesHelper.java
+@@ -8328,6 +8328,7 @@ public class SendMessagesHelper extends BaseController implements NotificationCe
+                     boolean isSentError = false;
+                     if (error == null) {
+                         final int oldId = newMsgObj.id;
++                        Ni12LocalEmoji.capture(newMsgObj.dialog_id, oldId, newMsgObj.entities);
+                         final ArrayList<TLRPC.Message> sentMessages = new ArrayList<>();
+                         final String attachPath = newMsgObj.attachPath;
+                         final int existFlags;
+@@ -8541,7 +8542,8 @@ public class SendMessagesHelper extends BaseController implements NotificationCe
+                                     });
+                                 });
+                             } else {
+-                                getNotificationCenter().postNotificationName(NotificationCenter.messageReceivedByServer, oldId, newMsgObj.id, newMsgObj, newMsgObj.dialog_id, 0L, existFlags, scheduled);
++                                Ni12LocalEmoji.restore(oldId, newMsgObj);
++getNotificationCenter().postNotificationName(NotificationCenter.messageReceivedByServer, oldId, newMsgObj.id, newMsgObj, newMsgObj.dialog_id, 0L, existFlags, scheduled);
+                                 getNotificationCenter().postNotificationName(NotificationCenter.messageReceivedByServer2, oldId, newMsgObj.id, newMsgObj, newMsgObj.dialog_id, 0L, existFlags, scheduled);
+                                 getMessagesStorage().getStorageQueue().postRunnable(() -> {
+                                     int mode = scheduled ? ChatActivity.MODE_SCHEDULED : 0;
+@@ -8563,7 +8565,8 @@ public class SendMessagesHelper extends BaseController implements NotificationCe
+ 
+                                     AndroidUtilities.runOnUIThread(() -> {
+                                         getMediaDataController().increasePeerRaiting(newMsgObj.dialog_id);
+-                                        getNotificationCenter().postNotificationName(NotificationCenter.messageReceivedByServer, oldId, newMsgObj.id, newMsgObj, newMsgObj.dialog_id, 0L, existFlags, scheduled);
++                                        Ni12LocalEmoji.restore(oldId, newMsgObj);
++getNotificationCenter().postNotificationName(NotificationCenter.messageReceivedByServer, oldId, newMsgObj.id, newMsgObj, newMsgObj.dialog_id, 0L, existFlags, scheduled);
+                                         getNotificationCenter().postNotificationName(NotificationCenter.messageReceivedByServer2, oldId, newMsgObj.id, newMsgObj, newMsgObj.dialog_id, 0L, existFlags, scheduled);
+                                         processSentMessage(oldId);
+                                         removeFromSendingMessages(oldId, scheduled);
 diff --git a/TMessagesProj/src/main/java/org/telegram/ui/ActionBar/Theme.java b/TMessagesProj/src/main/java/org/telegram/ui/ActionBar/Theme.java
 index 037673c6..47f776cd 100644
 --- a/TMessagesProj/src/main/java/org/telegram/ui/ActionBar/Theme.java
@@ -909,6 +1054,31 @@ index 7bb617df..58f58ee0 100644
      private void toggleMute(boolean instant) {
          boolean muted = getMessagesController().isDialogMuted(dialog_id, getTopicId());
          if (!muted) {
+diff --git a/TMessagesProj/src/main/java/org/telegram/ui/Components/ChatActivityEnterView.java b/TMessagesProj/src/main/java/org/telegram/ui/Components/ChatActivityEnterView.java
+index fb8b09fa..e9890c04 100644
+--- a/TMessagesProj/src/main/java/org/telegram/ui/Components/ChatActivityEnterView.java
++++ b/TMessagesProj/src/main/java/org/telegram/ui/Components/ChatActivityEnterView.java
+@@ -8760,6 +8760,7 @@ public class ChatActivityEnterView extends FrameLayout implements
+         if (message == null || parentFragment == null) {
+             return false;
+         }
++        if (true) return false; // ni12gram: premium emoji are allowed locally
+         final boolean isPremium = UserConfig.getInstance(currentAccount).isPremium();
+         if (!isPremium && UserConfig.getInstance(currentAccount).getClientUserId() != dialogId && message instanceof Spanned) {
+             AnimatedEmojiSpan[] animatedEmojis = ((Spanned) message).getSpans(0, message.length(), AnimatedEmojiSpan.class);
+diff --git a/TMessagesProj/src/main/java/org/telegram/ui/Components/EmojiView.java b/TMessagesProj/src/main/java/org/telegram/ui/Components/EmojiView.java
+index 36cdeb85..b68951ad 100644
+--- a/TMessagesProj/src/main/java/org/telegram/ui/Components/EmojiView.java
++++ b/TMessagesProj/src/main/java/org/telegram/ui/Components/EmojiView.java
+@@ -311,7 +311,7 @@ public class EmojiView extends FrameLayout implements
+         }
+     }
+ 
+-    private boolean allowEmojisForNonPremium;
++    private boolean allowEmojisForNonPremium = true; // ni12gram
+     public void allowEmojisForNonPremium(boolean allow) {
+         allowEmojisForNonPremium = allow;
+     }
 diff --git a/TMessagesProj/src/main/java/org/telegram/ui/IntroActivity.java b/TMessagesProj/src/main/java/org/telegram/ui/IntroActivity.java
 index b8babfe0..10ad04db 100644
 --- a/TMessagesProj/src/main/java/org/telegram/ui/IntroActivity.java
