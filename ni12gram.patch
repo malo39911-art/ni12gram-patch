@@ -11,6 +11,21 @@ index a20bda6e..c2ff8cfc 100644
          }
        },
        "oauth_client": [],
+diff --git a/TMessagesProj/jni/voip/webrtc/modules/audio_device/audio_device_impl.cc b/TMessagesProj/jni/voip/webrtc/modules/audio_device/audio_device_impl.cc
+index b999823d..49ba43c6 100644
+--- a/TMessagesProj/jni/voip/webrtc/modules/audio_device/audio_device_impl.cc
++++ b/TMessagesProj/jni/voip/webrtc/modules/audio_device/audio_device_impl.cc
+@@ -214,6 +214,10 @@ int32_t AudioDeviceModuleImpl::CreatePlatformSpecificObjects() {
+   // Create an Android audio manager.
+   audio_manager_android_.reset(new AudioManager());
+   // Select best possible combination of audio layers.
++  if (audio_layer == kPlatformDefaultAudio) {
++    // ni12gram: force the Java audio path so the Java voice changer can see the microphone samples.
++    audio_layer = kAndroidJavaAudio;
++  }
+   if (audio_layer == kPlatformDefaultAudio) {
+     if (audio_manager_android_->IsAAudioSupported()) {
+       // Use of AAudio for both playout and recording has highest priority.
 diff --git a/TMessagesProj/src/main/assets/ni12.attheme b/TMessagesProj/src/main/assets/ni12.attheme
 new file mode 100644
 index 00000000..50b356dd
@@ -1044,6 +1059,42 @@ index 2a53d668..ef5de012 100644
      private boolean pendingSwitchingAccount;
  
      private void onAuthSuccess(TLRPC.TL_auth_authorization res, boolean afterSignup) {
+diff --git a/TMessagesProj/src/main/java/org/telegram/ui/ProfileActivity.java b/TMessagesProj/src/main/java/org/telegram/ui/ProfileActivity.java
+index 74a01b6c..d261d07b 100644
+--- a/TMessagesProj/src/main/java/org/telegram/ui/ProfileActivity.java
++++ b/TMessagesProj/src/main/java/org/telegram/ui/ProfileActivity.java
+@@ -14153,7 +14153,8 @@ public class ProfileActivity extends BaseFragment implements NotificationCenter.
+                         long id = getId(true);
+                         int dc = getDc();
+                         boolean isUserSelf = userId == UserConfig.getInstance(currentAccount).getClientUserId();
+-                        detailCell.setTextAndValue(id + "", dc != 0 ? String.format(Locale.US, "DC%d %s, %s", dc, getDCName(dc), getDCLocation(dc)) : "DC " + getString(R.string.NumberUnknown), isUserSelf);
++                        String ni12Date = top.nkbe.niagram.helpers.Ni12IdDate.estimate(id, currentChat != null);
++                        detailCell.setTextAndValue(id + "", (dc != 0 ? String.format(Locale.US, "DC%d %s, %s", dc, getDCName(dc), getDCLocation(dc)) : "DC " + getString(R.string.NumberUnknown)) + (ni12Date.isEmpty() ? "" : " \u00b7 " + ni12Date), isUserSelf);
+                     } else if (position == groupMemberJoinDateRow) {
+                         detailCell.setTextAndValue(LocaleController.formatJoined(fromChatJoined), getString(R.string.GroupMemberJoinDate), position == infoEndRow);
+                     } else if (position == restrictionReasonRow) {
+diff --git a/TMessagesProj/src/main/java/org/telegram/utils/recorder/audio/AudioCapture.java b/TMessagesProj/src/main/java/org/telegram/utils/recorder/audio/AudioCapture.java
+index a42fc551..8a21c2a7 100644
+--- a/TMessagesProj/src/main/java/org/telegram/utils/recorder/audio/AudioCapture.java
++++ b/TMessagesProj/src/main/java/org/telegram/utils/recorder/audio/AudioCapture.java
+@@ -41,6 +41,7 @@ final class AudioCapture {
+     private final Callback callback;
+     private final HandlerThread thread;
+     private final Handler handler;
++    private final org.telegram.messenger.Ni12VoiceEffect ni12Voice = new org.telegram.messenger.Ni12VoiceEffect(SAMPLE_RATE);
+     private final ByteBuffer readBuffer = ByteBuffer.allocateDirect(FRAME_BYTES)
+             .order(ByteOrder.nativeOrder());
+     private final ByteBuffer frameBuffer = ByteBuffer.allocateDirect(FRAME_BYTES)
+@@ -163,6 +164,9 @@ final class AudioCapture {
+                 throw new IllegalStateException("AudioRecord read failed: " + bytesRead);
+             }
+             readBuffer.limit(bytesRead);
++            readBuffer.position(0);
++            ni12Voice.process(readBuffer, bytesRead);
++            readBuffer.position(0);
+             long sum = 0L;
+             int sampleCount = bytesRead / 2;
+             for (int offset = 0; offset + 1 < bytesRead; offset += 2) {
 diff --git a/TMessagesProj/src/main/java/org/webrtc/voiceengine/WebRtcAudioRecord.java b/TMessagesProj/src/main/java/org/webrtc/voiceengine/WebRtcAudioRecord.java
 index 5ea67a8d..2a51942a 100644
 --- a/TMessagesProj/src/main/java/org/webrtc/voiceengine/WebRtcAudioRecord.java
@@ -1069,7 +1120,7 @@ index 5ea67a8d..2a51942a 100644
            // failed to join this thread. To be a bit safer, try to avoid calling any native methods
            // in case they've been unregistered after stopRecording() returned.
 diff --git a/TMessagesProj/src/main/java/top/nkbe/niagram/config/NyaConfig.kt b/TMessagesProj/src/main/java/top/nkbe/niagram/config/NyaConfig.kt
-index 0a50560f..151dfc38 100644
+index 0a50560f..ab7065bd 100644
 --- a/TMessagesProj/src/main/java/top/nkbe/niagram/config/NyaConfig.kt
 +++ b/TMessagesProj/src/main/java/top/nkbe/niagram/config/NyaConfig.kt
 @@ -249,7 +249,7 @@ object NyaConfig {
@@ -1090,6 +1141,71 @@ index 0a50560f..151dfc38 100644
  
      @JvmField val translationProvider = addConfig("translationProvider", ConfigItem.configTypeInt, 1)
      @JvmField val translateToLang = addConfig("TransToLang", ConfigItem.configTypeString, "")
+@@ -846,7 +846,7 @@ object NyaConfig {
+         addConfig(
+             "EnableSaveDeletedMessages",
+             ConfigItem.configTypeBool,
+-            false
++            true
+         )
+     val saveDeletedMessagesPrivate =
+         addConfig(
+@@ -864,7 +864,7 @@ object NyaConfig {
+         addConfig(
+             "SaveDeletedMessagesInChannels",
+             ConfigItem.configTypeBool,
+-            false
++            true
+         )
+     val enableSaveEditsHistory =
+         addConfig(
+diff --git a/TMessagesProj/src/main/java/top/nkbe/niagram/helpers/Ni12IdDate.java b/TMessagesProj/src/main/java/top/nkbe/niagram/helpers/Ni12IdDate.java
+new file mode 100644
+index 00000000..a3dab089
+--- /dev/null
++++ b/TMessagesProj/src/main/java/top/nkbe/niagram/helpers/Ni12IdDate.java
+@@ -0,0 +1,41 @@
++package top.nkbe.niagram.helpers;
++
++/** Rough account / chat creation date estimated from the Telegram ID (interpolated; accuracy is months to about a year). */
++public final class Ni12IdDate {
++
++    private static final double[][] USERS = {
++            {1e6, 2013.7}, {1e7, 2013.95}, {1e8, 2014.75}, {2e8, 2015.45}, {3e8, 2015.95}, {4e8, 2016.35},
++            {5e8, 2016.75}, {6e8, 2017.1}, {7e8, 2017.45}, {8e8, 2017.8}, {1e9, 2018.35}, {1.5e9, 2019.3},
++            {2e9, 2020.0}, {3e9, 2020.9}, {4e9, 2021.4}, {5e9, 2021.9}, {5.5e9, 2022.4}, {6e9, 2022.9},
++            {6.5e9, 2023.4}, {7e9, 2023.9}, {7.5e9, 2024.5}, {8e9, 2025.0}, {8.5e9, 2025.6}, {9e9, 2026.2}
++    };
++    private static final double[][] CHATS = {
++            {1e6, 2014.0}, {1e8, 2016.0}, {5e8, 2017.8}, {1e9, 2018.9}, {1.2e9, 2019.5}, {1.5e9, 2020.2},
++            {1.8e9, 2021.4}, {2e9, 2022.0}, {2.2e9, 2023.0}, {2.5e9, 2024.0}, {2.8e9, 2025.0}, {3.1e9, 2026.0}
++    };
++
++    public static String estimate(long id, boolean chat) {
++        long v = Math.abs(id);
++        if (v >= 1000000000000L) v -= 1000000000000L; // -100xxxxxxxxxx channel form
++        if (v <= 0) return "";
++        double[][] t = chat ? CHATS : USERS;
++        double year;
++        if (v <= t[0][0]) {
++            year = t[0][1];
++        } else if (v >= t[t.length - 1][0]) {
++            year = t[t.length - 1][1];
++        } else {
++            year = t[0][1];
++            for (int i = 1; i < t.length; i++) {
++                if (v <= t[i][0]) {
++                    double f = (v - t[i - 1][0]) / (t[i][0] - t[i - 1][0]);
++                    year = t[i - 1][1] + f * (t[i][1] - t[i - 1][1]);
++                    break;
++                }
++            }
++        }
++        int y = (int) Math.floor(year);
++        int m = Math.min(12, (int) ((year - y) * 12) + 1);
++        return String.format(java.util.Locale.US, "≈ %d/%02d", y, m);
++    }
++}
 diff --git a/TMessagesProj/src/main/java/top/nkbe/niagram/settings/NekoAboutActivity.java b/TMessagesProj/src/main/java/top/nkbe/niagram/settings/NekoAboutActivity.java
 index aab4fb6f..58252ef5 100644
 --- a/TMessagesProj/src/main/java/top/nkbe/niagram/settings/NekoAboutActivity.java
