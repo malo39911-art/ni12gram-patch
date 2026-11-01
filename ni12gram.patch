@@ -1035,7 +1035,7 @@ index 7bb617df..c54ac232 100644
  
              if (currentUser != null && currentUser.self && chatMode != MODE_SAVED) {
                  savedChatsItem = headerItem.lazilyAddSubItem(view_as_topics, R.drawable.msg_topics, LocaleController.getString(R.string.SavedViewAsChats));
-@@ -17791,6 +17799,26 @@ public class ChatActivity extends BaseFragment implements
+@@ -17791,6 +17799,30 @@ public class ChatActivity extends BaseFragment implements
          }
      }
  
