@@ -1022,7 +1022,7 @@ index 7bb617df..c54ac232 100644
 +                } else if (id == ni12_voice) {
 +                    showNi12VoiceDialog();
 +                } else if (id == ni12_gift) {
-+                    showNi12FakeGiftDialog();
++                    showNi12GiftPicker();
                  } else if (id == mute) {
                      toggleMute(false);
                  } else if (id == add_shortcut) {
@@ -1031,7 +1031,7 @@ index 7bb617df..c54ac232 100644
              }
              headerItem.setForceHidden(isTitleCentered());
 +            headerItem.lazilyAddSubItem(ni12_voice, R.drawable.msg_voicechat2_solar, LocaleController.getString(R.string.Ni12VoiceChanger));
-+            headerItem.lazilyAddSubItem(ni12_gift, R.drawable.msg_gift_premium_solar, LocaleController.getString(R.string.Ni12FakeGift));
++            headerItem.lazilyAddSubItem(ni12_gift, R.drawable.msg_gift_premium_solar, LocaleController.getString(R.string.Ni12SendGift));
  
              if (currentUser != null && currentUser.self && chatMode != MODE_SAVED) {
                  savedChatsItem = headerItem.lazilyAddSubItem(view_as_topics, R.drawable.msg_topics, LocaleController.getString(R.string.SavedViewAsChats));
@@ -1039,33 +1039,12 @@ index 7bb617df..c54ac232 100644
          }
      }
  
-+    private void showNi12FakeGiftDialog() {
++    private void showNi12GiftPicker() {
 +        if (getParentActivity() == null || chatMode != MODE_DEFAULT) return;
-+        final String[] gifts = new String[]{"\uD83D\uDE02 " + LocaleController.getString(R.string.Ni12GiftLaugh), "\uD83D\uDC8E " + LocaleController.getString(R.string.Ni12GiftDiamond), "\uD83D\uDC51 " + LocaleController.getString(R.string.Ni12GiftCrown), "\uD83C\uDF39 " + LocaleController.getString(R.string.Ni12GiftRose)};
-+        AlertDialog.Builder builder = new AlertDialog.Builder(getParentActivity(), themeDelegate);
-+        builder.setTitle(LocaleController.getString(R.string.Ni12FakeGift));
-+        builder.setItems(gifts, (d, which) -> {
-+            try {
-+                TLRPC.TL_messageService m = new TLRPC.TL_messageService();
-+                m.id = getUserConfig().getNewMessageId();
-+                m.local_id = m.id;
-+                m.date = getConnectionsManager().getCurrentTime();
-+                m.dialog_id = dialog_id;
-+                m.peer_id = getMessagesController().getPeer(dialog_id);
-+                m.from_id = getMessagesController().getPeer(getUserConfig().getClientUserId());
-+                m.out = false;
-+                TLRPC.TL_messageActionCustomAction act = new TLRPC.TL_messageActionCustomAction();
-+                act.message = "\uD83C\uDF81 " + LocaleController.getString(R.string.Ni12FakeGiftLabel) + " " + gifts[which];
-+                m.action = act;
-+                ArrayList<MessageObject> arr = new ArrayList<>();
-+                arr.add(new MessageObject(currentAccount, m, true, false));
-+                getNotificationCenter().postNotificationName(NotificationCenter.didReceiveNewMessages, dialog_id, arr, false, 0);
-+            } catch (Throwable t) {
-+                FileLog.e(t);
-+            }
-+        });
-+        builder.setNegativeButton(LocaleController.getString(R.string.Close), null);
-+        showDialog(builder.create());
++        if (currentUser == null) return;
++        org.telegram.ui.Gifts.GiftSheet sheet =
++                new org.telegram.ui.Gifts.GiftSheet(getParentActivity(), currentAccount, currentUser.id, null);
++        sheet.show();
 +    }
 +
 +    private void showNi12VoiceDialog() {
@@ -23188,12 +23167,7 @@ index ecfd8720..973d3537 100644
 +    <string name="Ni12VoiceOff">إيقاف</string>
 +    <string name="Ni12VoiceRobot">روبوت (حديدي)</string>
 +    <string name="Ni12VoiceAnon">مجهول (Anonymous)</string>
-+    <string name="Ni12FakeGift">هدية وهمية (محلية فقط)</string>
-+    <string name="Ni12FakeGiftLabel">هدية وهمية، محلية فقط، لم يُرسل شيء:</string>
-+    <string name="Ni12GiftLaugh">ضحك</string>
-+    <string name="Ni12GiftDiamond">ألماس</string>
-+    <string name="Ni12GiftCrown">تاج</string>
-+    <string name="Ni12GiftRose">وردة</string>
++    <string name="Ni12SendGift">إهداء هدية</string>
  </resources>
 \ No newline at end of file
 diff --git a/TMessagesProj/src/main/res/values-ar/strings_nia.xml b/TMessagesProj/src/main/res/values-ar/strings_nia.xml
@@ -24427,12 +24401,7 @@ index 668f1fbf..f315b810 100644
 +    <string name="Ni12VoiceOff">Off</string>
 +    <string name="Ni12VoiceRobot">Robot (metallic)</string>
 +    <string name="Ni12VoiceAnon">Anonymous</string>
-+    <string name="Ni12FakeGift">Fake gift (local only)</string>
-+    <string name="Ni12FakeGiftLabel">FAKE gift, local only, nothing was sent:</string>
-+    <string name="Ni12GiftLaugh">Laugh</string>
-+    <string name="Ni12GiftDiamond">Diamond</string>
-+    <string name="Ni12GiftCrown">Crown</string>
-+    <string name="Ni12GiftRose">Rose</string>
++    <string name="Ni12SendGift">Send a gift</string>
  </resources>
 diff --git a/TMessagesProj/src/main/res/values/strings_nia.xml b/TMessagesProj/src/main/res/values/strings_nia.xml
 index c212fcb7..3e66b1ce 100644
