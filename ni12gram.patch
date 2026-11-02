@@ -23154,7 +23154,7 @@ index ecfd8720..973d3537 100644
      <string name="AppNameBeta">(Beta) تيليجرام</string>
      <string name="LanguageName">العربية</string>
      <string name="English">الإنجليزية</string>
-@@ -1243,4 +1243,19 @@
+@@ -1243,4 +1243,14 @@
      <string name="RemindTodayAt">\'ذكّرني اليوم عند\' HH:mm</string>
      <string name="RemindDayAt">\'ذكّرني بتاريخ\' d MMM \'عند\' HH:mm</string>
      <string name="RemindDayYearAt">\'ذكّرني بتاريخ\' d MMM yyyy \'عند\' HH:mm</string>
@@ -24385,7 +24385,7 @@ index 668f1fbf..f315b810 100644
      <string name="AppNameBeta">Telegram Beta</string>
      <string name="LanguageName">English</string>
      <string name="English">English</string>
-@@ -11551,4 +11551,22 @@
+@@ -11551,4 +11551,17 @@
      <string name="CreateManagedBotUsernameBotLimit">This bot already has a Premium username. Remove it before adding another.</string>
      <string name="CreateManagedBotUsernameSuffixMissing">The username must end in %1$s.</string>
      <string name="CreateManagedBotUsernameCheckFailed">Couldn\'t check this username. Please try again.</string>
