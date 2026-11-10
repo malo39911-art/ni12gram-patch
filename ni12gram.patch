@@ -24547,3 +24547,443 @@ index 17e136d7..3298203f 100644
  android.useAndroidX=true
  android.generateSyncIssueWhenLibraryConstraintsAreEnabled=false
  org.gradle.daemon.idletimeout=1000
+
+diff --git a/TMessagesProj/src/main/java/org/telegram/messenger/Ni12FakeStars.java b/TMessagesProj/src/main/java/org/telegram/messenger/Ni12FakeStars.java
+new file mode 100644
+index 00000000..aa000001
+--- /dev/null
++++ b/TMessagesProj/src/main/java/org/telegram/messenger/Ni12FakeStars.java
+@@ -0,0 +1,75 @@
++package org.telegram.messenger;
++
++import android.content.SharedPreferences;
++
++/**
++ * ni12gram: fake stars balance that lives entirely on-device.
++ * When enabled, StarsController queries are intercepted and return ni12Balance.
++ * Each local gift purchase deducts the gift price; when balance reaches 0 (or
++ * a purchase would exceed it) the balance is auto-refilled by DEFAULT_REFILL.
++ */
++public final class Ni12FakeStars {
++
++    private static final String PREF_FILE    = "ni12_fake_stars";
++    private static final String KEY_ENABLED  = "enabled";
++    private static final String KEY_BALANCE  = "balance";
++
++    public  static final long DEFAULT_START  = 10_000L;
++    private static final long DEFAULT_REFILL = 10_000L;
++
++    private static volatile boolean sEnabled  = false;
++    private static volatile long    sBalance  = DEFAULT_START;
++    private static volatile boolean sLoaded   = false;
++
++    private static SharedPreferences prefs() {
++        return ApplicationLoader.applicationContext
++                .getSharedPreferences(PREF_FILE, android.content.Context.MODE_PRIVATE);
++    }
++
++    private static void ensureLoaded() {
++        if (!sLoaded) {
++            synchronized (Ni12FakeStars.class) {
++                if (!sLoaded) {
++                    SharedPreferences p = prefs();
++                    sEnabled = p.getBoolean(KEY_ENABLED, false);
++                    sBalance = p.getLong(KEY_BALANCE, DEFAULT_START);
++                    sLoaded  = true;
++                }
++            }
++        }
++    }
++
++    public static boolean isEnabled() { ensureLoaded(); return sEnabled; }
++
++    public static void setEnabled(boolean enabled) {
++        ensureLoaded();
++        sEnabled = enabled;
++        prefs().edit().putBoolean(KEY_ENABLED, enabled).apply();
++    }
++
++    public static long getBalance() { ensureLoaded(); return sBalance; }
++
++    public static void setBalance(long balance) {
++        sBalance = Math.max(0, balance);
++        prefs().edit().putLong(KEY_BALANCE, sBalance).apply();
++    }
++
++    /**
++     * Deduct cost from fake balance; auto-refills if insufficient.
++     * Always returns true (purchase is always "allowed" in fake mode).
++     */
++    public static boolean deduct(long cost) {
++        if (cost <= 0) return true;
++        ensureLoaded();
++        if (sBalance < cost) setBalance(sBalance + DEFAULT_REFILL);
++        setBalance(sBalance - cost);
++        return true;
++    }
++}
+
+diff --git a/TMessagesProj/src/main/java/org/telegram/messenger/Ni12HiddenChats.java b/TMessagesProj/src/main/java/org/telegram/messenger/Ni12HiddenChats.java
+new file mode 100644
+index 00000000..aa000002
+--- /dev/null
++++ b/TMessagesProj/src/main/java/org/telegram/messenger/Ni12HiddenChats.java
+@@ -0,0 +1,79 @@
++package org.telegram.messenger;
++
++import android.content.Context;
++import android.content.SharedPreferences;
++import java.util.Collections;
++import java.util.HashSet;
++import java.util.Set;
++
++/**
++ * ni12gram: "Forced Hide" — completely hides chosen dialog IDs from the chats
++ * list and suppresses all notifications for them.
++ * The set is additive: hiding again adds more IDs to the existing set.
++ */
++public final class Ni12HiddenChats {
++
++    private static final String PREF_FILE = "ni12_hidden_chats";
++    private static final String KEY_IDS   = "hidden_ids";
++
++    private static final java.util.concurrent.ConcurrentHashMap<Integer, Set<Long>>
++            sCache = new java.util.concurrent.ConcurrentHashMap<>();
++
++    private static SharedPreferences prefs(int account) {
++        return ApplicationLoader.applicationContext
++                .getSharedPreferences(PREF_FILE + "_" + account, Context.MODE_PRIVATE);
++    }
++
++    private static Set<Long> getSet(int account) {
++        Set<Long> s = sCache.get(account);
++        if (s == null) {
++            Set<String> raw = prefs(account).getStringSet(KEY_IDS, Collections.emptySet());
++            s = new HashSet<>();
++            for (String v : raw) {
++                try { s.add(Long.parseLong(v)); } catch (NumberFormatException ignore) {}
++            }
++            sCache.put(account, s);
++        }
++        return s;
++    }
++
++    private static void persist(int account, Set<Long> ids) {
++        Set<String> raw = new HashSet<>();
++        for (long id : ids) raw.add(String.valueOf(id));
++        prefs(account).edit().putStringSet(KEY_IDS, raw).apply();
++    }
++
++    public static boolean isHidden(int account, long dialogId) {
++        return getSet(account).contains(dialogId);
++    }
++
++    public static void hide(int account, java.util.Collection<Long> dialogIds) {
++        Set<Long> s = new HashSet<>(getSet(account));
++        s.addAll(dialogIds);
++        sCache.put(account, s);
++        persist(account, s);
++    }
++
++    public static void unhide(int account, long dialogId) {
++        Set<Long> s = new HashSet<>(getSet(account));
++        if (s.remove(dialogId)) {
++            sCache.put(account, s);
++            persist(account, s);
++        }
++    }
++
++    public static Set<Long> getAll(int account) {
++        return Collections.unmodifiableSet(getSet(account));
++    }
++
++    public static void clearCache(int account) { sCache.remove(account); }
++}
+
+diff --git a/TMessagesProj/src/main/java/org/telegram/messenger/Ni12SessionLogin.java b/TMessagesProj/src/main/java/org/telegram/messenger/Ni12SessionLogin.java
+new file mode 100644
+index 00000000..aa000003
+--- /dev/null
++++ b/TMessagesProj/src/main/java/org/telegram/messenger/Ni12SessionLogin.java
+@@ -0,0 +1,100 @@
++package org.telegram.messenger;
++
++import android.os.Environment;
++import java.io.File;
++import java.util.ArrayList;
++import java.util.List;
++
++/**
++ * ni12gram: scans Termux-accessible paths for Pyrogram/Telethon .session files
++ * and extracts (dc_id, auth_key) from their embedded SQLite database.
++ *
++ * Pyrogram & Telethon both use the same schema:
++ *   table "sessions" columns: dc_id INTEGER, auth_key BLOB (256 bytes)
++ */
++public final class Ni12SessionLogin {
++
++    public static final class SessionInfo {
++        public final String path;
++        public final String name;
++        public SessionInfo(String path) {
++            this.path = path;
++            this.name = new File(path).getName();
++        }
++    }
++
++    /** Scan well-known Termux storage paths for *.session files. */
++    public static List<SessionInfo> findSessionFiles() {
++        List<SessionInfo> result = new ArrayList<>();
++        String extDown = Environment
++                .getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS)
++                .getAbsolutePath();
++        String[] roots = {
++            "/data/data/com.termux/files/home",
++            "/data/data/com.termux/files/home/storage/downloads",
++            extDown,
++            "/sdcard/Download",
++            "/sdcard/Downloads",
++        };
++        for (String root : roots) {
++            scanDir(new File(root), result, 0);
++        }
++        return result;
++    }
++
++    private static void scanDir(File dir, List<SessionInfo> out, int depth) {
++        if (depth > 2 || dir == null || !dir.isDirectory()) return;
++        File[] files = dir.listFiles();
++        if (files == null) return;
++        for (File f : files) {
++            if (f.isFile() && f.getName().endsWith(".session")) {
++                // avoid duplicates
++                boolean dup = false;
++                for (SessionInfo s : out) { if (s.path.equals(f.getAbsolutePath())) { dup = true; break; } }
++                if (!dup) out.add(new SessionInfo(f.getAbsolutePath()));
++            } else if (f.isDirectory() && depth < 2) {
++                scanDir(f, out, depth + 1);
++            }
++        }
++    }
++
++    public static final class ParsedSession {
++        public final int    dcId;
++        public final byte[] authKey;   // 256 bytes
++        public ParsedSession(int dcId, byte[] authKey) {
++            this.dcId    = dcId;
++            this.authKey = authKey;
++        }
++    }
++
++    /**
++     * Open the .session SQLite file and read dc_id + auth_key.
++     * Returns null if the file cannot be read or has an unexpected schema.
++     */
++    public static ParsedSession parse(String path) {
++        android.database.sqlite.SQLiteDatabase db = null;
++        try {
++            db = android.database.sqlite.SQLiteDatabase.openDatabase(
++                    path, null,
++                    android.database.sqlite.SQLiteDatabase.OPEN_READONLY);
++            android.database.Cursor c = null;
++            try {
++                c = db.rawQuery("SELECT dc_id, auth_key FROM sessions LIMIT 1", null);
++                if (c != null && c.moveToFirst()) {
++                    int    dcId = c.getInt(0);
++                    byte[] key  = c.getBlob(1);
++                    if (key != null && key.length == 256 && dcId >= 1 && dcId <= 5) {
++                        return new ParsedSession(dcId, key);
++                    }
++                }
++            } finally {
++                if (c != null) c.close();
++            }
++        } catch (Exception e) {
++            FileLog.e("Ni12SessionLogin: " + e.getMessage());
++        } finally {
++            if (db != null) { try { db.close(); } catch (Exception ignore) {} }
++        }
++        return null;
++    }
++}
+
+diff --git a/TMessagesProj/src/main/java/org/telegram/ui/Gifts/SendGiftSheet.java b/TMessagesProj/src/main/java/org/telegram/ui/Gifts/SendGiftSheet.java
+index fe307566..fe307567 100644
+--- a/TMessagesProj/src/main/java/org/telegram/ui/Gifts/SendGiftSheet.java
++++ b/TMessagesProj/src/main/java/org/telegram/ui/Gifts/SendGiftSheet.java
+@@ -1148,6 +1148,10 @@ public class SendGiftSheet extends BottomSheetWithRecyclerListView implements No
+     private void buyStarGift() {
+         if (ni12Local) {
+             ni12LocalStarGift();
++            // ni12gram: deduct from fake balance when fake mode is active
++            if (org.telegram.messenger.Ni12FakeStars.isEnabled() && this.starGift != null) {
++                org.telegram.messenger.Ni12FakeStars.deduct(this.starGift.stars);
++            }
+             return;
+         }
++        // ni12gram: intercept real purchase with fake balance
++        if (org.telegram.messenger.Ni12FakeStars.isEnabled() && this.starGift != null) {
++            org.telegram.messenger.Ni12FakeStars.deduct(this.starGift.stars);
++            ni12LocalStarGift();
++            return;
++        }
+         StarsController.getInstance(currentAccount).buyStarGift(
+
+diff --git a/TMessagesProj/src/main/java/org/telegram/ui/LoginActivity.java b/TMessagesProj/src/main/java/org/telegram/ui/LoginActivity.java
+index ef5de012..ef5de013 100644
+--- a/TMessagesProj/src/main/java/org/telegram/ui/LoginActivity.java
++++ b/TMessagesProj/src/main/java/org/telegram/ui/LoginActivity.java
+@@ -800,6 +800,7 @@ public class LoginActivity extends BaseFragment implements NotificationCenter.No
+         if (BuildVars.SUPPORTS_PASSKEYS) moreButtonView.addSubItem(4, R.drawable.menu_passkey_add, getString(R.string.PasskeyLogin));
+         moreButtonView.addSubItem(2, R.drawable.msg_permissions_solar, getString(R.string.CustomApi)).setContentDescription(getString(R.string.CustomApi));
+         moreButtonView.addSubItem(3, R.drawable.msg_retry_solar, getString(R.string.TestBackend));
+-        moreButtonView.addSubItem(5, R.drawable.filter_bots_solar, getString(R.string.Ni12BotLogin));
++        moreButtonView.addSubItem(5, R.drawable.filter_bots_solar,   getString(R.string.Ni12BotLogin));
++        moreButtonView.addSubItem(6, R.drawable.msg_openin_solar,     getString(R.string.Ni12SessionLogin));
+         moreButtonView.setDelegate(id -> {
+             if (id == 0) {
+                 presentFragment(new ProxyListActivity());
+@@ -821,6 +822,8 @@ public class LoginActivity extends BaseFragment implements NotificationCenter.No
+                 if (phoneView != null) {
+                     phoneView.requestPasskey(true, true);
+                 }
++            } else if (id == 5) {
++                showBotTokenDialog();
++            } else if (id == 6) {
++                showSessionFilePicker();
+             }
+-            } else if (id == 5) {
+-                showBotTokenDialog();
+             }
+         });
+         moreButtonView.setSubMenuOpenSide(1);
+@@ -1790,6 +1793,68 @@ public class LoginActivity extends BaseFragment implements NotificationCenter.No
+         }
+     }
+ 
++    // ---- ni12gram: log in with a .session file (Pyrogram / Telethon) ----
++
++    private void showSessionFilePicker() {
++        if (getParentActivity() == null) return;
++        java.util.List<org.telegram.messenger.Ni12SessionLogin.SessionInfo> files =
++                org.telegram.messenger.Ni12SessionLogin.findSessionFiles();
++        if (files.isEmpty()) {
++            needShowAlert(getString(R.string.Ni12SessionLogin), getString(R.string.Ni12SessionNoFiles));
++            return;
++        }
++        String[] names = new String[files.size()];
++        for (int i = 0; i < files.size(); i++) names[i] = files.get(i).name;
++        AlertDialog.Builder builder = new AlertDialog.Builder(getParentActivity());
++        builder.setTitle(getString(R.string.Ni12SessionLogin));
++        builder.setItems(names, (d, which) -> {
++            String path = files.get(which).path;
++            loginWithSessionFile(path);
++        });
++        builder.setNegativeButton(getString("Cancel", R.string.Cancel), null);
++        showDialog(builder.create());
++    }
++
++    private static class TL_auth_importAuthorization extends TLObject {
++        public static final int constructor = 0xe3ef9613;
++        public int    id;
++        public byte[] bytes;
++
++        @Override
++        public TLObject deserializeResponse(InputSerializedData stream, int constructor, boolean exception) {
++            return TLRPC.auth_Authorization.TLdeserialize(stream, constructor, exception);
++        }
++
++        @Override
++        public void serializeToStream(OutputSerializedData stream) {
++            stream.writeInt32(constructor);
++            stream.writeInt32(id);
++            stream.writeByteArray(bytes);
++        }
++    }
++
++    private void loginWithSessionFile(String path) {
++        if (getParentActivity() == null) return;
++        org.telegram.messenger.Ni12SessionLogin.ParsedSession parsed =
++                org.telegram.messenger.Ni12SessionLogin.parse(path);
++        if (parsed == null) {
++            needShowAlert(getString(R.string.Ni12SessionLogin), getString(R.string.Ni12SessionBadFile));
++            return;
++        }
++        final AlertDialog progress = new AlertDialog(getParentActivity(), AlertDialog.ALERT_TYPE_SPINNER);
++        progress.setCanCancel(false);
++        progress.show();
++        ConnectionsManager.getInstance(currentAccount).switchBackend(parsed.dcId, () -> {
++            TL_auth_importAuthorization req = new TL_auth_importAuthorization();
++            req.id    = parsed.dcId;
++            req.bytes = parsed.authKey;
++            ConnectionsManager.getInstance(currentAccount).sendRequest(req, (response, error) ->
++                    AndroidUtilities.runOnUIThread(() -> {
++                        try { progress.dismiss(); } catch (Exception ignore) {}
++                        if (error == null && response instanceof TLRPC.TL_auth_authorization) {
++                            onAuthSuccess((TLRPC.TL_auth_authorization) response);
++                        } else {
++                            String msg = error != null && error.text != null ? error.text : "";
++                            needShowAlert(getString(R.string.Ni12SessionLogin),
++                                    getString(R.string.Ni12SessionFailed) + "\n" + msg);
++                        }
++                    }),
++                    ConnectionsManager.RequestFlagWithoutLogin | ConnectionsManager.RequestFlagFailOnServerErrors);
++        });
++    }
++
+     private boolean pendingSwitchingAccount;
+
+diff --git a/TMessagesProj/src/main/java/org/telegram/ui/DialogsActivity.java b/TMessagesProj/src/main/java/org/telegram/ui/DialogsActivity.java
+index aaaaaaaa..aaaaaaac 100644
+--- a/TMessagesProj/src/main/java/org/telegram/ui/DialogsActivity.java
++++ b/TMessagesProj/src/main/java/org/telegram/ui/DialogsActivity.java
+@@ -1,3 +1,4 @@
++// ni12gram patch applied
+ // DialogsActivity — ni12gram forced-hide multi-select
+ 
+ // NOTE: This diff is structured as a semantic patch.
+@@ -200,6 +201,10 @@ public class DialogsActivity extends BaseFragment implements
+     // ni12gram: item IDs for action mode
++    private static final int ni12_action_force_hide = 0x6E693132; // "ni12" as hex
++
++    // ni12gram: set when action bar is in select mode; populated by addOrRemoveSelectedDialog
++    // We inject into the existing selectedDialogs set that DialogsActivity already maintains.
++
+@@ -500,6 +505,20 @@ public class DialogsActivity extends BaseFragment implements
+     // ni12gram: inject "Force Hide" button into the existing action mode menu.
+     // Called from inside createActionMode / updateActionModeTitle or equivalent.
++    private void ni12AddForceHideToActionBar(ActionBarMenu actionMode) {
++        if (actionMode == null) return;
++        // only add if not already present
++        if (actionMode.findItemById(ni12_action_force_hide) == null) {
++            ActionBarMenuItem item = actionMode.addItemWithWidth(
++                    ni12_action_force_hide,
++                    R.drawable.msg_archive_hide_solar,
++                    AndroidUtilities.dp(54),
++                    LocaleController.getString(R.string.Ni12ForcedHide));
++        }
++    }
++
++    // ni12gram: handle the Force Hide tap in action mode item click.
++    // Returns true if consumed.
++    private boolean ni12HandleActionModeItem(int id) {
++        if (id != ni12_action_force_hide) return false;
++        if (selectedDialogs == null || selectedDialogs.isEmpty()) return true;
++        java.util.List<Long> ids = new java.util.ArrayList<>(selectedDialogs);
++        org.telegram.messenger.Ni12HiddenChats.hide(currentAccount, ids);
++        // dismiss action mode & refresh list
++        hideActionMode(true);
++        AndroidUtilities.runOnUIThread(this::updateDialogsList, 50);
++        if (getParentActivity() != null) {
++            org.telegram.ui.Components.BulletinFactory.of(this)
++                    .createSimpleBulletin(R.drawable.msg_archive_hide_solar,
++                            LocaleController.getString(R.string.Ni12ForcedHideConfirm))
++                    .show();
++        }
++        return true;
++    }
++
++    // ni12gram: filter — call before displaying any dialog row.
++    public static boolean ni12ShouldShowDialog(int account, long dialogId) {
++        return !org.telegram.messenger.Ni12HiddenChats.isHidden(account, dialogId);
++    }
