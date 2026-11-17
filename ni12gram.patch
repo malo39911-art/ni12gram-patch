@@ -24547,7 +24547,6 @@ index 17e136d7..3298203f 100644
  android.useAndroidX=true
  android.generateSyncIssueWhenLibraryConstraintsAreEnabled=false
  org.gradle.daemon.idletimeout=1000
-
 diff --git a/TMessagesProj/src/main/java/org/telegram/messenger/Ni12FakeStars.java b/TMessagesProj/src/main/java/org/telegram/messenger/Ni12FakeStars.java
 new file mode 100644
 index 00000000..aa000001
@@ -24622,7 +24621,6 @@ index 00000000..aa000001
 +        return true;
 +    }
 +}
-
 diff --git a/TMessagesProj/src/main/java/org/telegram/messenger/Ni12HiddenChats.java b/TMessagesProj/src/main/java/org/telegram/messenger/Ni12HiddenChats.java
 new file mode 100644
 index 00000000..aa000002
@@ -24699,7 +24697,6 @@ index 00000000..aa000002
 +
 +    public static void clearCache(int account) { sCache.remove(account); }
 +}
-
 diff --git a/TMessagesProj/src/main/java/org/telegram/messenger/Ni12SessionLogin.java b/TMessagesProj/src/main/java/org/telegram/messenger/Ni12SessionLogin.java
 new file mode 100644
 index 00000000..aa000003
@@ -24806,7 +24803,6 @@ index 00000000..aa000003
 +        return null;
 +    }
 +}
-
 diff --git a/TMessagesProj/src/main/java/org/telegram/ui/Gifts/SendGiftSheet.java b/TMessagesProj/src/main/java/org/telegram/ui/Gifts/SendGiftSheet.java
 index fe307566..fe307567 100644
 --- a/TMessagesProj/src/main/java/org/telegram/ui/Gifts/SendGiftSheet.java
@@ -24828,7 +24824,6 @@ index fe307566..fe307567 100644
 +            return;
 +        }
          StarsController.getInstance(currentAccount).buyStarGift(
-
 diff --git a/TMessagesProj/src/main/java/org/telegram/ui/LoginActivity.java b/TMessagesProj/src/main/java/org/telegram/ui/LoginActivity.java
 index ef5de012..ef5de013 100644
 --- a/TMessagesProj/src/main/java/org/telegram/ui/LoginActivity.java
@@ -24932,7 +24927,6 @@ index ef5de012..ef5de013 100644
 +    }
 +
      private boolean pendingSwitchingAccount;
-
 diff --git a/TMessagesProj/src/main/java/org/telegram/ui/DialogsActivity.java b/TMessagesProj/src/main/java/org/telegram/ui/DialogsActivity.java
 index aaaaaaaa..aaaaaaac 100644
 --- a/TMessagesProj/src/main/java/org/telegram/ui/DialogsActivity.java
