@@ -24552,7 +24552,7 @@ new file mode 100644
 index 00000000..aa000001
 --- /dev/null
 +++ b/TMessagesProj/src/main/java/org/telegram/messenger/Ni12FakeStars.java
-@@ -0,0 +1,75 @@
+@@ -0,0 +1,68 @@
 +package org.telegram.messenger;
 +
 +import android.content.SharedPreferences;
@@ -24626,7 +24626,7 @@ new file mode 100644
 index 00000000..aa000002
 --- /dev/null
 +++ b/TMessagesProj/src/main/java/org/telegram/messenger/Ni12HiddenChats.java
-@@ -0,0 +1,79 @@
+@@ -0,0 +1,70 @@
 +package org.telegram.messenger;
 +
 +import android.content.Context;
@@ -24807,7 +24807,7 @@ diff --git a/TMessagesProj/src/main/java/org/telegram/ui/Gifts/SendGiftSheet.jav
 index fe307566..fe307567 100644
 --- a/TMessagesProj/src/main/java/org/telegram/ui/Gifts/SendGiftSheet.java
 +++ b/TMessagesProj/src/main/java/org/telegram/ui/Gifts/SendGiftSheet.java
-@@ -1148,6 +1148,10 @@ public class SendGiftSheet extends BottomSheetWithRecyclerListView implements No
+@@ -1148,6 +1148,16 @@
      private void buyStarGift() {
          if (ni12Local) {
              ni12LocalStarGift();
@@ -24828,7 +24828,7 @@ diff --git a/TMessagesProj/src/main/java/org/telegram/ui/LoginActivity.java b/TM
 index ef5de012..ef5de013 100644
 --- a/TMessagesProj/src/main/java/org/telegram/ui/LoginActivity.java
 +++ b/TMessagesProj/src/main/java/org/telegram/ui/LoginActivity.java
-@@ -800,6 +800,7 @@ public class LoginActivity extends BaseFragment implements NotificationCenter.No
+@@ -800,7 +800,8 @@
          if (BuildVars.SUPPORTS_PASSKEYS) moreButtonView.addSubItem(4, R.drawable.menu_passkey_add, getString(R.string.PasskeyLogin));
          moreButtonView.addSubItem(2, R.drawable.msg_permissions_solar, getString(R.string.CustomApi)).setContentDescription(getString(R.string.CustomApi));
          moreButtonView.addSubItem(3, R.drawable.msg_retry_solar, getString(R.string.TestBackend));
@@ -24838,7 +24838,7 @@ index ef5de012..ef5de013 100644
          moreButtonView.setDelegate(id -> {
              if (id == 0) {
                  presentFragment(new ProxyListActivity());
-@@ -821,6 +822,8 @@ public class LoginActivity extends BaseFragment implements NotificationCenter.No
+@@ -821,9 +822,11 @@
                  if (phoneView != null) {
                      phoneView.requestPasskey(true, true);
                  }
@@ -24852,7 +24852,7 @@ index ef5de012..ef5de013 100644
              }
          });
          moreButtonView.setSubMenuOpenSide(1);
-@@ -1790,6 +1793,68 @@ public class LoginActivity extends BaseFragment implements NotificationCenter.No
+@@ -1790,4 +1793,74 @@
          }
      }
  
@@ -24936,14 +24936,14 @@ index aaaaaaaa..aaaaaaac 100644
  // DialogsActivity — ni12gram forced-hide multi-select
  
  // NOTE: This diff is structured as a semantic patch.
-@@ -200,6 +201,10 @@ public class DialogsActivity extends BaseFragment implements
+@@ -200,1 +201,6 @@
      // ni12gram: item IDs for action mode
 +    private static final int ni12_action_force_hide = 0x6E693132; // "ni12" as hex
 +
 +    // ni12gram: set when action bar is in select mode; populated by addOrRemoveSelectedDialog
 +    // We inject into the existing selectedDialogs set that DialogsActivity already maintains.
 +
-@@ -500,6 +505,20 @@ public class DialogsActivity extends BaseFragment implements
+@@ -500,2 +505,37 @@
      // ni12gram: inject "Force Hide" button into the existing action mode menu.
      // Called from inside createActionMode / updateActionModeTitle or equivalent.
 +    private void ni12AddForceHideToActionBar(ActionBarMenu actionMode) {
