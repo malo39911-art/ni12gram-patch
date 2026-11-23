@@ -24448,7 +24448,7 @@ index 668f1fbf..3e1bd96b 100644
      <string name="AppNameBeta">Telegram Beta</string>
      <string name="LanguageName">English</string>
      <string name="English">English</string>
-@@ -11551,4 +11551,17 @@
+@@ -11551,4 +11551,25 @@
      <string name="CreateManagedBotUsernameBotLimit">This bot already has a Premium username. Remove it before adding another.</string>
      <string name="CreateManagedBotUsernameSuffixMissing">The username must end in %1$s.</string>
      <string name="CreateManagedBotUsernameCheckFailed">Couldn\'t check this username. Please try again.</string>
@@ -24465,6 +24465,14 @@ index 668f1fbf..3e1bd96b 100644
 +    <string name="Ni12VoiceRobot">Robot (metallic)</string>
 +    <string name="Ni12VoiceAnon">Anonymous</string>
 +    <string name="Ni12SendGift">Send a gift</string>
++    <string name="Ni12FakeStarsTitle">Fake stars balance</string>
++    <string name="Ni12FakeStarsHint">Set fake stars balance</string>
++    <string name="Ni12SessionLogin">Log in with .session file</string>
++    <string name="Ni12SessionNoFiles">No .session files found in Termux storage.</string>
++    <string name="Ni12SessionBadFile">Could not read this .session file.</string>
++    <string name="Ni12SessionFailed">Login failed:</string>
++    <string name="Ni12ForcedHide">Force hide</string>
++    <string name="Ni12ForcedHideConfirm">%d chat(s) hidden</string>
  </resources>
 diff --git a/TMessagesProj/src/main/res/values/strings_nia.xml b/TMessagesProj/src/main/res/values/strings_nia.xml
 index c212fcb7..3e66b1ce 100644
@@ -24828,32 +24836,25 @@ diff --git a/TMessagesProj/src/main/java/org/telegram/ui/LoginActivity.java b/TM
 index ef5de012..ef5de013 100644
 --- a/TMessagesProj/src/main/java/org/telegram/ui/LoginActivity.java
 +++ b/TMessagesProj/src/main/java/org/telegram/ui/LoginActivity.java
-@@ -800,7 +800,8 @@
-         if (BuildVars.SUPPORTS_PASSKEYS) moreButtonView.addSubItem(4, R.drawable.menu_passkey_add, getString(R.string.PasskeyLogin));
+@@ -803,6 +803,7 @@
          moreButtonView.addSubItem(2, R.drawable.msg_permissions_solar, getString(R.string.CustomApi)).setContentDescription(getString(R.string.CustomApi));
          moreButtonView.addSubItem(3, R.drawable.msg_retry_solar, getString(R.string.TestBackend));
--        moreButtonView.addSubItem(5, R.drawable.filter_bots_solar, getString(R.string.Ni12BotLogin));
-+        moreButtonView.addSubItem(5, R.drawable.filter_bots_solar,   getString(R.string.Ni12BotLogin));
-+        moreButtonView.addSubItem(6, R.drawable.msg_openin_solar,     getString(R.string.Ni12SessionLogin));
+         moreButtonView.addSubItem(5, R.drawable.filter_bots_solar, getString(R.string.Ni12BotLogin));
++        moreButtonView.addSubItem(6, R.drawable.msg_openin_solar, getString(R.string.Ni12SessionLogin));
          moreButtonView.setDelegate(id -> {
              if (id == 0) {
                  presentFragment(new ProxyListActivity());
-@@ -821,9 +822,11 @@
-                 if (phoneView != null) {
-                     phoneView.requestPasskey(true, true);
+@@ -826,6 +827,8 @@
                  }
-+            } else if (id == 5) {
-+                showBotTokenDialog();
+             } else if (id == 5) {
+                 showBotTokenDialog();
 +            } else if (id == 6) {
 +                showSessionFilePicker();
              }
--            } else if (id == 5) {
--                showBotTokenDialog();
-             }
          });
          moreButtonView.setSubMenuOpenSide(1);
-@@ -1790,4 +1793,74 @@
-         }
+@@ -1784,6 +1787,72 @@
+         }), ConnectionsManager.RequestFlagWithoutLogin | ConnectionsManager.RequestFlagFailOnServerErrors);
      }
  
 +    // ---- ni12gram: log in with a .session file (Pyrogram / Telethon) ----
@@ -24878,24 +24879,6 @@ index ef5de012..ef5de013 100644
 +        showDialog(builder.create());
 +    }
 +
-+    private static class TL_auth_importAuthorization extends TLObject {
-+        public static final int constructor = 0xe3ef9613;
-+        public int    id;
-+        public byte[] bytes;
-+
-+        @Override
-+        public TLObject deserializeResponse(InputSerializedData stream, int constructor, boolean exception) {
-+            return TLRPC.auth_Authorization.TLdeserialize(stream, constructor, exception);
-+        }
-+
-+        @Override
-+        public void serializeToStream(OutputSerializedData stream) {
-+            stream.writeInt32(constructor);
-+            stream.writeInt32(id);
-+            stream.writeByteArray(bytes);
-+        }
-+    }
-+
 +    private void loginWithSessionFile(String path) {
 +        if (getParentActivity() == null) return;
 +        org.telegram.messenger.Ni12SessionLogin.ParsedSession parsed =
@@ -24907,77 +24890,102 @@ index ef5de012..ef5de013 100644
 +        final AlertDialog progress = new AlertDialog(getParentActivity(), AlertDialog.ALERT_TYPE_SPINNER);
 +        progress.setCanCancel(false);
 +        progress.show();
-+        ConnectionsManager.getInstance(currentAccount).switchBackend(parsed.dcId, () -> {
-+            TL_auth_importAuthorization req = new TL_auth_importAuthorization();
-+            req.id    = parsed.dcId;
-+            req.bytes = parsed.authKey;
-+            ConnectionsManager.getInstance(currentAccount).sendRequest(req, (response, error) ->
-+                    AndroidUtilities.runOnUIThread(() -> {
-+                        try { progress.dismiss(); } catch (Exception ignore) {}
-+                        if (error == null && response instanceof TLRPC.TL_auth_authorization) {
-+                            onAuthSuccess((TLRPC.TL_auth_authorization) response);
-+                        } else {
-+                            String msg = error != null && error.text != null ? error.text : "";
-+                            needShowAlert(getString(R.string.Ni12SessionLogin),
-+                                    getString(R.string.Ni12SessionFailed) + "\n" + msg);
-+                        }
-+                    }),
-+                    ConnectionsManager.RequestFlagWithoutLogin | ConnectionsManager.RequestFlagFailOnServerErrors);
-+        });
++
++        TL_auth_importAuthorization req = new TL_auth_importAuthorization();
++        req.bytes = parsed.authKey;
++        ConnectionsManager.getInstance(currentAccount).sendRequest(req, (response, error) -> AndroidUtilities.runOnUIThread(() -> {
++            try {
++                progress.dismiss();
++            } catch (Exception ignore) {
++            }
++            if (error == null && response instanceof TLRPC.TL_auth_authorization) {
++                onAuthSuccess((TLRPC.TL_auth_authorization) response);
++            } else {
++                String text = error != null && error.text != null ? error.text : "";
++                needShowAlert(getString(R.string.Ni12SessionLogin), getString(R.string.Ni12SessionFailed) + "\n" + text);
++            }
++        }), ConnectionsManager.RequestFlagWithoutLogin | ConnectionsManager.RequestFlagFailOnServerErrors);
++    }
++
++    private static class TL_auth_importAuthorization extends TLObject {
++        public static final int constructor = 0xe3ef9613;
++        public byte[] bytes;
++
++        @Override
++        public TLObject deserializeResponse(InputSerializedData stream, int constructor, boolean exception) {
++            return TLRPC.auth_Authorization.TLdeserialize(stream, constructor, exception);
++        }
++
++        @Override
++        public void serializeToStream(OutputSerializedData stream) {
++            stream.writeInt32(constructor);
++            stream.writeByteArray(bytes);
++        }
 +    }
 +
      private boolean pendingSwitchingAccount;
+ 
+     private void onAuthSuccess(TLRPC.TL_auth_authorization res, boolean afterSignup) {
 diff --git a/TMessagesProj/src/main/java/org/telegram/ui/DialogsActivity.java b/TMessagesProj/src/main/java/org/telegram/ui/DialogsActivity.java
 index aaaaaaaa..aaaaaaac 100644
 --- a/TMessagesProj/src/main/java/org/telegram/ui/DialogsActivity.java
 +++ b/TMessagesProj/src/main/java/org/telegram/ui/DialogsActivity.java
-@@ -1,3 +1,4 @@
-+// ni12gram patch applied
- // DialogsActivity — ni12gram forced-hide multi-select
+@@ -728,6 +728,7 @@
+     private final static int remove_from_folder = 110;
+     private final static int community_ungroup = 111;
+     private final static int lock_chat = 112;
++    private final static int ni12_force_hide = 113;
  
- // NOTE: This diff is structured as a semantic patch.
-@@ -200,1 +201,6 @@
-     // ni12gram: item IDs for action mode
-+    private static final int ni12_action_force_hide = 0x6E693132; // "ni12" as hex
+     private final static int select_all = 1000;
+ 
+@@ -6957,6 +6958,27 @@
+         lockItem = otherItem.addSubItem(lock_chat, R.drawable.baseline_lock_24, LocaleController.getString(R.string.LockChat));
+         otherItem.addSubItem(select_all, R.drawable.msg_select_between_solar, LocaleController.getString(R.string.SelectAll));
+ 
++        ActionBarMenuItem ni12ForceHideItem = actionMode.addItemWithWidth(ni12_force_hide, R.drawable.msg_archive_hide, dp(48), LocaleController.getString(R.string.Ni12ForcedHide));
++        ni12ForceHideItem.setOnClickListener(ni12View -> {
++            if (selectedDialogs.isEmpty()) {
++                return;
++            }
++            org.telegram.messenger.Ni12HiddenChats.hide(currentAccount, selectedDialogs);
++            int ni12Count = selectedDialogs.size();
++            hideActionMode(true);
++            if (viewPages != null) {
++                for (int ni12P = 0; ni12P < viewPages.length; ni12P++) {
++                    if (viewPages[ni12P] != null && viewPages[ni12P].dialogsAdapter != null) {
++                        viewPages[ni12P].dialogsAdapter.notifyDataSetChanged();
++                    }
++                }
++            }
++            if (getParentActivity() != null) {
++                BulletinFactory.of(this).createSimpleBulletin(R.raw.chats_infotip, LocaleController.formatString(R.string.Ni12ForcedHideConfirm, ni12Count)).show();
++            }
++        });
++        actionModeViews.add(ni12ForceHideItem);
 +
-+    // ni12gram: set when action bar is in select mode; populated by addOrRemoveSelectedDialog
-+    // We inject into the existing selectedDialogs set that DialogsActivity already maintains.
-+
-@@ -500,2 +505,37 @@
-     // ni12gram: inject "Force Hide" button into the existing action mode menu.
-     // Called from inside createActionMode / updateActionModeTitle or equivalent.
-+    private void ni12AddForceHideToActionBar(ActionBarMenu actionMode) {
-+        if (actionMode == null) return;
-+        // only add if not already present
-+        if (actionMode.findItemById(ni12_action_force_hide) == null) {
-+            ActionBarMenuItem item = actionMode.addItemWithWidth(
-+                    ni12_action_force_hide,
-+                    R.drawable.msg_archive_hide_solar,
-+                    AndroidUtilities.dp(54),
-+                    LocaleController.getString(R.string.Ni12ForcedHide));
+         muteItem.setOnLongClickListener(e -> {
+             performSelectedDialogsAction(selectedDialogs, mute, true, true);
+             return true;
+@@ -11269,6 +11291,22 @@
+ 
+     @NonNull
+     public ArrayList<TLRPC.Dialog> getDialogsArray(int currentAccount, int dialogsType, int folderId, boolean frozen) {
++        ArrayList<TLRPC.Dialog> ni12Result = getDialogsArrayNi12Real(currentAccount, dialogsType, folderId, frozen);
++        if (org.telegram.messenger.Ni12HiddenChats.getAll(currentAccount).isEmpty()) {
++            return ni12Result;
 +        }
-+    }
-+
-+    // ni12gram: handle the Force Hide tap in action mode item click.
-+    // Returns true if consumed.
-+    private boolean ni12HandleActionModeItem(int id) {
-+        if (id != ni12_action_force_hide) return false;
-+        if (selectedDialogs == null || selectedDialogs.isEmpty()) return true;
-+        java.util.List<Long> ids = new java.util.ArrayList<>(selectedDialogs);
-+        org.telegram.messenger.Ni12HiddenChats.hide(currentAccount, ids);
-+        // dismiss action mode & refresh list
-+        hideActionMode(true);
-+        AndroidUtilities.runOnUIThread(this::updateDialogsList, 50);
-+        if (getParentActivity() != null) {
-+            org.telegram.ui.Components.BulletinFactory.of(this)
-+                    .createSimpleBulletin(R.drawable.msg_archive_hide_solar,
-+                            LocaleController.getString(R.string.Ni12ForcedHideConfirm))
-+                    .show();
++        ArrayList<TLRPC.Dialog> ni12Filtered = new ArrayList<>(ni12Result.size());
++        for (int ni12I = 0; ni12I < ni12Result.size(); ni12I++) {
++            TLRPC.Dialog ni12D = ni12Result.get(ni12I);
++            if (ni12D == null || !org.telegram.messenger.Ni12HiddenChats.isHidden(currentAccount, ni12D.id)) {
++                ni12Filtered.add(ni12D);
++            }
 +        }
-+        return true;
++        return ni12Filtered;
 +    }
 +
-+    // ni12gram: filter — call before displaying any dialog row.
-+    public static boolean ni12ShouldShowDialog(int account, long dialogId) {
-+        return !org.telegram.messenger.Ni12HiddenChats.isHidden(account, dialogId);
-+    }
++    @NonNull
++    private ArrayList<TLRPC.Dialog> getDialogsArrayNi12Real(int currentAccount, int dialogsType, int folderId, boolean frozen) {
+         if (frozen && frozenDialogsList != null) {
+             return frozenDialogsList;
+         }
